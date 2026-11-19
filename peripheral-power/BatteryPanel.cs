@@ -252,7 +252,7 @@ internal sealed class DeviceCard : Control
     public DeviceCard(BatteryReading battery)
     {
         this.battery = battery;
-        AccessibleName = $"{battery.Name}，{battery.Percent}%";
+        AccessibleName = $"{battery.Name}，{battery.Percent}% {battery.PowerStatus}".TrimEnd();
         AccessibleRole = AccessibleRole.StaticText;
         SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
     }
@@ -283,9 +283,10 @@ internal sealed class DeviceCard : Control
         using var muted = new SolidBrush(TrayArt.Muted);
         using var textLeft = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
         using var textRight = new StringFormat { Alignment = StringAlignment.Far };
-        var palette = TrayArt.BatteryColors(battery.Percent, battery.Charging);
+        var palette = TrayArt.BatteryColors(battery.Percent, battery.Charging || battery.IsReference);
         using var batteryInk = new SolidBrush(palette.Foreground);
-        var source = $"{TrayArt.DeviceLabel(battery.Kind)}  ·  {battery.Connection}{(battery.Charging ? "  ·  充电中" : "")}";
+        var source = $"{TrayArt.DeviceLabel(battery.Kind)}  ·  {battery.Connection}";
+        if (battery.PowerStatus.Length > 0) source += $"  ·  {battery.PowerStatus}";
         g.DrawString(battery.Name, mainFont, ink, new RectangleF(70, 10, width - 166, 20), textLeft);
         g.DrawString(source, captionFont, muted, new RectangleF(70, 32, width - 150, 17), textLeft);
         g.DrawString($"{battery.Percent}%", pctFont, batteryInk, new RectangleF(width - 97, 12, 82, 33), textRight);

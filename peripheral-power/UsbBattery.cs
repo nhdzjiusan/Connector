@@ -8,10 +8,15 @@ namespace PeripheralPower;
 
 internal enum DeviceKind { Mouse, Keyboard, Headset }
 
-internal sealed record BatteryReading(string Id, string Name, DeviceKind Kind, int Percent, bool Charging, string Connection);
+internal sealed record BatteryReading(string Id, string Name, DeviceKind Kind, int Percent, bool Charging,
+    string Connection, bool IsReference = false)
+{
+    public string PowerStatus => IsReference ? "已接电源 · 参考电量" : Charging ? "充电中" : "";
+}
 
 internal static class UsbBattery
 {
+    private readonly record struct BatterySample(int Percent, bool Charging, bool IsReference = false);
     private sealed record Protocol(int Vendor, int Product, uint Usage, string Name, DeviceKind Kind);
     private static readonly Protocol[] Protocols =
     [
@@ -49,7 +54,7 @@ internal static class UsbBattery
                 {
                     stream.ReadTimeout = 500;
                     stream.WriteTimeout = 550;
-                    (int Percent, bool Charging)? value = protocol.Kind switch
+                    BatterySample? value = protocol.Kind switch
                     {
                         DeviceKind.Mouse => ReadMouse(device, stream, protocol.Product == 0x4245, diagnostic),
                         DeviceKind.Keyboard => ReadKeyboard(device, stream, diagnostic),
@@ -60,7 +65,8 @@ internal static class UsbBattery
 
                     var name = protocol.Kind == DeviceKind.Headset ? device.GetProductName() : protocol.Name;
                     return new BatteryReading($"usb-{protocol.Kind}", name, protocol.Kind,
-                        battery.Percent, battery.Charging, protocol.Product == 0x418C ? "USB" : "2.4 GHz");
+                        battery.Percent, battery.Charging, protocol.Product == 0x418C ? "USB" : "2.4 GHz",
+                        battery.IsReference);
                 }
             }
             catch (Exception ex) when (ex is IOException or TimeoutException or UnauthorizedAccessException or NotSupportedException)
@@ -72,7 +78,7 @@ internal static class UsbBattery
     }
 
     // Windows includes the report ID byte even on the unnumbered G3 collection.
-    private static (int, bool)? ReadMouse(HidDevice device, HidStream stream, bool receiver, Action<string>? diagnostic)
+    private static BatterySample? ReadMouse(HidDevice device, HidStream stream, bool receiver, Action<string>? diagnostic)
     {
         if (receiver)
         {
@@ -83,10 +89,10 @@ internal static class UsbBattery
 
         var reply = Exchange(device, stream, [0, 0x55, 0x30, 0xA5, 0x0B, 0x2E, 1, 1, 1],
             data => data.Length >= 11 && data[1] == 0xAA && data[2] == 0x30 && data[9] <= 100, diagnostic);
-        return reply == null ? null : (reply[9], reply[10] == 1);
+        return reply == null ? null : new BatterySample(reply[9], reply[10] == 1);
     }
 
-    private static (int, bool)? ReadKeyboard(HidDevice device, HidStream stream, Action<string>? diagnostic)
+    private static BatterySample? ReadKeyboard(HidDevice device, HidStream stream, Action<string>? diagnostic)
     {
         var request = new byte[20];
         request[0] = 0x13;
@@ -96,7 +102,7 @@ internal static class UsbBattery
         var reply = Exchange(device, stream, request,
             data => data.Length == 20 && data[0] == 0x13 && data[1] == 0x4A &&
                 data[4] >= 2 && data[5] <= 100 && Checksum(data.AsSpan(0, 19)) == data[19], diagnostic);
-        return reply == null ? null : (reply[5], (reply[6] >> 4) == 1 && (reply[6] & 15) != 1);
+        return reply == null ? null : new BatterySample(reply[5], (reply[6] >> 4) == 1 && (reply[6] & 15) != 1);
     }
 
     private static byte Checksum(ReadOnlySpan<byte> data)
@@ -106,12 +112,19 @@ internal static class UsbBattery
         return unchecked((byte)sum);
     }
 
-    private static (int, bool)? ReadHeadset(HidDevice device, HidStream stream, Action<string>? diagnostic)
+    private static BatterySample? ReadHeadset(HidDevice device, HidStream stream, Action<string>? diagnostic)
     {
-        var reply = Exchange(device, stream, [0x55, 0x65, 1],
-            data => data.Length >= 4 && data[0] == 0x55 && data[1] == 0x65 &&
-                data[2] <= 100 && data[3] is 2 or 3 or 4, diagnostic);
-        return reply == null ? null : (reply[2], reply[3] == 3);
+        var reply = Exchange(device, stream, [0x55, 0x65, 1], IsHeadsetBatteryReply, diagnostic);
+        if (reply == null) return null;
+        // While plugged in, the headset can keep reporting the level from before charging.
+        return new BatterySample(reply[2], Charging: reply[3] == 3, IsReference: reply[3] is 0 or 3);
+    }
+
+    private static bool IsHeadsetBatteryReply(byte[] data)
+    {
+        if (data.Length < 4 || data[0] != 0x55 || data[1] != 0x65 || data[2] > 100) return false;
+        // Status zero also occurs on USB power. Exclude empty reports and the 55 65 01 00 request echo.
+        return data[3] is 2 or 3 or 4 || (data[3] == 0 && data[2] >= 2);
     }
 
     private static byte[]? Exchange(HidDevice device, HidStream stream, byte[] command,

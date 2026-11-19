@@ -27,14 +27,15 @@ internal static class TrayArt
             DeviceKind.Keyboard => Color.FromArgb(67, 76, 171),
             _ => Color.FromArgb(108, 63, 151)
         };
-        if (reading.Percent <= 20 && !reading.Charging) hue = Color.FromArgb(168, 44, 59);
+        var onPower = reading.Charging || reading.IsReference;
+        if (reading.Percent <= 20 && !onPower) hue = Color.FromArgb(168, 44, 59);
         Fill(g, new RectangleF(0.8f, 0.8f, 30.4f, 30.4f), 7, hue);
         var percent = reading.Percent.ToString(System.Globalization.CultureInfo.InvariantCulture);
         using var font = new Font("Segoe UI", percent.Length == 3 ? 16f : 20f, FontStyle.Bold, GraphicsUnit.Pixel);
         using var ink = new SolidBrush(Color.White);
         using var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
         g.DrawString(percent, font, ink, new RectangleF(0, 7, 32, 24), center);
-        using var line = new Pen(reading.Charging ? Color.FromArgb(149, 224, 255) : Color.FromArgb(202, 219, 255), 2.2f)
+        using var line = new Pen(onPower ? Color.FromArgb(149, 224, 255) : Color.FromArgb(202, 219, 255), 2.2f)
             { StartCap = LineCap.Round, EndCap = LineCap.Round };
         g.DrawLine(line, 10.5f, 6.5f, 21.5f, 6.5f);
     });

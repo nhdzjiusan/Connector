@@ -323,7 +323,8 @@ internal sealed class PowerContext : ApplicationContext
 
     private static string Tooltip(BatteryReading battery)
     {
-        var text = $"{battery.Percent}% · {battery.Name}{(battery.Charging ? " · 充电中" : "")}";
+        var text = $"{battery.Percent}% · {battery.Name}";
+        if (battery.PowerStatus.Length > 0) text += $" · {battery.PowerStatus}";
         return text.Length <= 63 ? text : text[..62] + "…";
     }
 
