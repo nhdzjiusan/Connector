@@ -1,1 +1,3 @@
 # Connector
+
+- [外设电量](peripheral-power/) · [下载 Windows x64 免安装版](https://github.com/nhdzjiusan/Connector/releases/tag/peripheral-power-v1.0.0)
