@@ -1,0 +1,6 @@
+日志-clash-switch.log
+状态-clash-guard.json
+状态-clash-guard.json.*.tmp
+暂停-clash-guard.json
+clash-guard-*.trace
+.env
