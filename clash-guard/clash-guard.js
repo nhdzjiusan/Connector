@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Clash Verge 节点守护，由 Windows 计划任务定期运行。
+ * Clash Verge / FlClash 节点守护，由 Windows 计划任务定期运行。
  * 「节点选择」只选带 🇸🇬 前缀的真实代理节点。全部不可用时直连，恢复后切回。
  * --verbose 输出检查过程；--dry-run 只检查，不写代理选择、日志或状态文件。
  * 退出码：0 正常或跳过，1 切换或运行失败，2 控制器 API 异常，3 另一实例在运行。
@@ -17,9 +17,11 @@ const DEFAULT_TEST_URL = 'https://www.gstatic.com/generate_204';
 const NO_COOLDOWN = process.env.CLASH_GUARD_NO_COOLDOWN === '1';
 const CFG = {
   api: {
+    name: 'Clash Verge',
     host: '127.0.0.1',
     port: 9097,
     secret: process.env.CLASH_GUARD_SECRET ?? '',
+    statePath: path.join(__dirname, '状态-clash-guard.json'),
   },
   group: '节点选择',
   directName: 'DIRECT',
@@ -32,7 +34,6 @@ const CFG = {
   badTtlMs: 30 * 60 * 1000,
   offLogEveryMs: 30 * 60 * 1000,
   logPath: path.join(__dirname, '日志-clash-switch.log'),
-  statePath: path.join(__dirname, '状态-clash-guard.json'),
   pausePath: path.join(__dirname, '暂停-clash-guard.json'),
   pauseLogEveryMs: 30 * 60 * 1000,
 };
@@ -47,6 +48,17 @@ const VERBOSE = ARG.includes('--verbose') || ARG.includes('-v');
 const DRY = ARG.includes('--dry-run');
 
 class ControllerError extends Error {}
+// Clash 进程没在跑（端口上没人应答）：说明用户可能正在用备用客户端，不算故障。
+class ClashDownError extends ControllerError {}
+
+const UNREACHABLE_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH',
+  'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND',
+]);
+
+function isUnreachable(e) {
+  return UNREACHABLE_CODES.has(e?.code) || e?.name === 'TimeoutError' || e?.name === 'AbortError';
+}
 
 function ts(d = new Date()) {
   const p = n => String(n).padStart(2, '0');
@@ -86,17 +98,56 @@ function maintainLogs() {
   } catch { /* 首次运行时可能还没有切换日志 */ }
 }
 
-function api(method, apiPath, body) {
+function readFlClashController() {
+  if (!process.env.APPDATA) return null;
+  const prefsPath = path.join(process.env.APPDATA, 'com.follow', 'clash', 'shared_preferences.json');
+  let prefs;
+  try {
+    prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
+  } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw new ControllerError('读取 FlClash 设置失败：' + e.message);
+  }
+  let config;
+  try {
+    config = JSON.parse(prefs?.['flutter.config'] ?? '{}')?.patchClashConfig;
+  } catch {
+    throw new ControllerError('FlClash 设置中的 flutter.config 无法解析');
+  }
+  const host = '127.0.0.1';
+  const port = 9090;
+  if (config?.['external-controller'] !== `${host}:${port}`) return null;
+  if (typeof config.secret !== 'string' || !config.secret.trim()) {
+    throw new ControllerError('FlClash 外部控制器没有配置密钥');
+  }
+  return {
+    name: 'FlClash', host, port, secret: config.secret,
+    statePath: path.join(__dirname, '状态-clash-guard-flclash.json'),
+  };
+}
+
+async function connectController() {
+  try {
+    return await getSelection(CFG.api);
+  } catch (e) {
+    if (!(e instanceof ClashDownError)) throw e;
+    const flClash = readFlClashController();
+    if (flClash) return getSelection(flClash);
+    throw new ClashDownError(`${e.message}；FlClash 外部控制器未启用或尚未配置`);
+  }
+}
+
+function api(controller, method, apiPath, body) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8');
     const headers = {};
-    if (CFG.api.secret) headers.Authorization = 'Bearer ' + CFG.api.secret;
+    if (controller.secret) headers.Authorization = 'Bearer ' + controller.secret;
     if (payload) {
       headers['Content-Type'] = 'application/json';
       headers['Content-Length'] = payload.length;
     }
     const req = http.request({
-      host: CFG.api.host, port: CFG.api.port, path: apiPath, method, headers,
+      host: controller.host, port: controller.port, path: apiPath, method, headers,
       signal: AbortSignal.timeout(10000),
     }, res => {
       const chunks = [];
@@ -109,11 +160,12 @@ function api(method, apiPath, body) {
   });
 }
 
-async function getSelection() {
-  const r = await api('GET', '/proxies').catch(e => {
-    throw new ControllerError('读取 Clash API 失败：' + e.message);
+async function getSelection(controller) {
+  const r = await api(controller, 'GET', '/proxies').catch(e => {
+    if (isUnreachable(e)) throw new ClashDownError(`连不上 ${controller.name} API：${e.code || e.message}`);
+    throw new ControllerError(`读取 ${controller.name} API 失败：${e.message}`);
   });
-  if (r.code !== 200) throw new ControllerError(`GET /proxies 返回 HTTP ${r.code}`);
+  if (r.code !== 200) throw new ControllerError(`${controller.name} GET /proxies 返回 HTTP ${r.code}`);
 
   let proxies;
   try {
@@ -130,7 +182,7 @@ async function getSelection() {
       !Array.isArray(group.all) || group.all.some(name => typeof name !== 'string')) {
     throw new ControllerError(`「${CFG.group}」不是有效的手动选择组`);
   }
-  return { now: group.now, members: new Set(group.all), proxies };
+  return { controller, now: group.now, members: new Set(group.all), proxies };
 }
 
 function isSingaporeNode(name, proxies) {
@@ -144,12 +196,12 @@ function hasDirect({ members, proxies }) {
   return members.has(CFG.directName) && proxies[CFG.directName]?.type === 'Direct';
 }
 
-async function probeDelay(name, timeoutMs) {
+async function probeDelay(controller, name, timeoutMs) {
   const params = new URLSearchParams({ timeout: String(timeoutMs), url: CFG.testUrl });
   if (CFG.testUrl === DEFAULT_TEST_URL) params.set('expected', '204');
 
   try {
-    const r = await api('GET', `/proxies/${encodeURIComponent(name)}/delay?${params}`);
+    const r = await api(controller, 'GET', `/proxies/${encodeURIComponent(name)}/delay?${params}`);
     // mihomo 用 503/504 表示节点测速失败。
     if (r.code === 503 || r.code === 504) return { name, reason: `测速 HTTP ${r.code}` };
     if (r.code !== 200) throw new Error(`测速接口返回 HTTP ${r.code}`);
@@ -180,29 +232,29 @@ async function pool(items, limit, fn) {
   return results;
 }
 
-async function scanSingapore(candidates) {
+async function scanSingapore(controller, candidates) {
   if (VERBOSE) console.log(`扫描 ${candidates.length} 个新加坡节点`);
-  const results = await pool(candidates, CFG.scan.concurrency, name => probeDelay(name, CFG.scan.timeoutMs));
+  const results = await pool(candidates, CFG.scan.concurrency, name => probeDelay(controller, name, CFG.scan.timeoutMs));
   checkProbeErrors(results);
   return results
     .filter(result => result.delay < CFG.scan.maxDelay)
     .sort((a, b) => a.delay - b.delay);
 }
 
-function loadState() {
+function loadState(statePath) {
   try {
-    const state = JSON.parse(fs.readFileSync(CFG.statePath, 'utf8'));
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
     if (state && typeof state === 'object' && !Array.isArray(state)) return state;
   } catch { /* 状态文件可以不存在 */ }
   return {};
 }
 
-function saveState(state) {
+function saveState(statePath, state) {
   if (DRY) return;
-  const temporary = `${CFG.statePath}.${process.pid}.tmp`;
+  const temporary = `${statePath}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(temporary, JSON.stringify(state, null, 2) + '\n', 'utf8');
-    fs.renameSync(temporary, CFG.statePath);
+    fs.renameSync(temporary, statePath);
   } catch (e) {
     console.error('写状态失败：' + e.message);
     try { fs.unlinkSync(temporary); } catch { /* 临时文件可能未创建 */ }
@@ -241,18 +293,18 @@ function acquireLock() {
   });
 }
 
-async function getMode() {
-  const r = await api('GET', '/configs');
+async function getMode(controller) {
+  const r = await api(controller, 'GET', '/configs');
   if (r.code !== 200) return null;
   try { return JSON.parse(r.body)?.mode || null; } catch { return null; }
 }
 
 // 全局模式下流量实际走 GLOBAL 组，只改「节点选择」不生效，得同步一份。
-async function syncGlobal(name) {
-  const mode = await getMode().catch(() => null);
+async function syncGlobal(controller, name) {
+  const mode = await getMode(controller).catch(() => null);
   if (mode !== 'global') return;
   try {
-    const r = await api('PUT', '/proxies/GLOBAL', { name });
+    const r = await api(controller, 'PUT', '/proxies/GLOBAL', { name });
     if (r.code !== 204 && r.code !== 200) throw new Error(`HTTP ${r.code}`);
   } catch (e) {
     log('WARN', name, null, '全局模式同步 GLOBAL 组失败：' + e.message);
@@ -260,7 +312,8 @@ async function syncGlobal(name) {
 }
 
 async function changeSelection(initial, target, state, event, reason, badNodes) {
-  const latest = await getSelection();
+  const { controller } = initial;
+  const latest = await getSelection(controller);
   const { name, delay } = target;
   if (latest.now !== initial.now) {
     log('SKIP', latest.now, null, '检查期间所选节点已变化，下次再检查');
@@ -289,18 +342,18 @@ async function changeSelection(initial, target, state, event, reason, badNodes) 
   }
 
   try {
-    const put = await api('PUT', `/proxies/${encodeURIComponent(CFG.group)}`, { name });
+    const put = await api(controller, 'PUT', `/proxies/${encodeURIComponent(CFG.group)}`, { name });
     if (put.code !== 204 && put.code !== 200) throw new Error(`PUT 返回 HTTP ${put.code}`);
     let actual;
     try {
-      actual = await getSelection();
+      actual = await getSelection(controller);
     } catch (e) {
       throw new Error('已发送切换，复核失败：' + e.message);
     }
     const valid = name === CFG.directName ? hasDirect(actual) :
       actual.members.has(name) && isSingaporeNode(name, actual.proxies);
     if (actual.now !== name || !valid) throw new Error(`切换未确认，当前选择为 ${actual.now || '(空)'}`);
-    await syncGlobal(name);
+    await syncGlobal(controller, name);
   } catch (e) {
     log('ERROR', name, delay, e.message);
     return 1;
@@ -313,7 +366,7 @@ async function changeSelection(initial, target, state, event, reason, badNodes) 
   state.lastStatus = name === CFG.directName ? 'DIRECT' : 'OK';
   state.lastOffLog = name === CFG.directName ? stamp : 0;
   state.badNodes = Object.fromEntries(badNodes);
-  saveState(state);
+  saveState(controller.statePath, state);
   log(event, name, delay, reason);
   return 0;
 }
@@ -323,7 +376,7 @@ async function tryRestore(selection, state, singapore, sinceSwitch) {
     if (VERBOSE) console.log('刚切到 DIRECT，等待恢复冷却');
     return 0;
   }
-  const good = await scanSingapore(singapore);
+  const good = await scanSingapore(selection.controller, singapore);
   if (good.length > 0) {
     return changeSelection(selection, good[0], state, 'PROXY-ON',
       `新加坡 ${good.length}/${singapore.length} 个节点可用，从 DIRECT 恢复代理`, new Map());
@@ -333,19 +386,19 @@ async function tryRestore(selection, state, singapore, sinceSwitch) {
     log('SKIP', CFG.directName, null, `${singapore.length} 个新加坡节点中暂无可用节点，继续直连`);
     state.lastStatus = 'DIRECT';
     state.lastOffLog = Date.now();
-    saveState(state);
+    saveState(selection.controller.statePath, state);
   }
   return 0;
 }
 
 async function switchOrDirect(selection, state, singapore, currentAllowed) {
-  const { now } = selection;
+  const { controller, now } = selection;
   const candidates = singapore.filter(name => name !== now);
   const badNodes = recentBadNodes(state);
   const preferred = candidates.filter(name => !badNodes.has(name));
-  let good = await scanSingapore(preferred);
+  let good = await scanSingapore(controller, preferred);
   if (good.length === 0 && preferred.length < candidates.length) {
-    good = await scanSingapore(candidates.filter(name => badNodes.has(name)));
+    good = await scanSingapore(controller, candidates.filter(name => badNodes.has(name)));
   }
 
   if (good.length > 0) {
@@ -360,21 +413,42 @@ async function switchOrDirect(selection, state, singapore, currentAllowed) {
 }
 
 async function run() {
-  const state = loadState();
+  const guardState = loadState(CFG.api.statePath);
   const pause = pausedUntil();
   if (pause) {
     if (VERBOSE || DRY) console.log(`暂停中，到 ${ts(new Date(pause.until))}`);
-    if (VERBOSE || DRY || ageOf(state.lastPauseLog) >= CFG.pauseLogEveryMs) {
+    if (VERBOSE || DRY || ageOf(guardState.lastPauseLog) >= CFG.pauseLogEveryMs) {
       log('PAUSED', '-', null, `按暂停文件跳过，恢复时间 ${ts(new Date(pause.until))}`);
-      state.lastPauseLog = Date.now();
-      saveState(state);
+      guardState.lastPauseLog = Date.now();
+      saveState(CFG.api.statePath, guardState);
     }
     return 0;
   }
-  state.lastPauseLog = 0;
+  guardState.lastPauseLog = 0;
 
-  const selection = await getSelection();
-  const { now, members, proxies } = selection;
+  let selection;
+  try {
+    selection = await connectController();
+  } catch (e) {
+    if (e instanceof ClashDownError) {
+      // Clash 没开：静默跳过，每 offLogEveryMs 最多记一条，免得日志被刷满。
+      if (VERBOSE || DRY || ageOf(guardState.lastOffLog) >= CFG.offLogEveryMs) {
+        log('OFF', '-', null, `${e.message}，跳过本轮检查`);
+        guardState.lastOffLog = Date.now();
+        saveState(CFG.api.statePath, guardState);
+      }
+      return 0;
+    }
+    throw e;
+  }
+  if (guardState.lastOffLog) {
+    guardState.lastOffLog = 0;
+    saveState(CFG.api.statePath, guardState);
+  }
+
+  const { controller, now, members, proxies } = selection;
+  const state = controller === CFG.api ? guardState : loadState(controller.statePath);
+  if (VERBOSE || DRY) console.log(`使用 ${controller.name} 控制器 ${controller.host}:${controller.port}`);
   const sinceSwitch = state.lastSwitchTo === now ? ageOf(state.lastSwitch) : Infinity;
   const singapore = [...members].filter(name => isSingaporeNode(name, proxies));
 
@@ -389,7 +463,7 @@ async function run() {
     return switchOrDirect(selection, state, singapore, currentAllowed);
   }
 
-  let result = await probeDelay(now, CFG.judge.timeoutMs);
+  let result = await probeDelay(controller, now, CFG.judge.timeoutMs);
   checkProbeErrors([result]);
   if (result.delay <= CFG.judge.maxDelay) {
     if (VERBOSE) console.log(`${now} 正常 ${result.delay}ms`);
@@ -402,7 +476,7 @@ async function run() {
 
   log('FAIL', now, result.delay, `第 1/2 次，${result.reason || '延迟过高'}`);
   await new Promise(resolve => setTimeout(resolve, CFG.confirmGapMs));
-  result = await probeDelay(now, CFG.judge.timeoutMs);
+  result = await probeDelay(controller, now, CFG.judge.timeoutMs);
   checkProbeErrors([result]);
   if (result.delay <= CFG.judge.maxDelay) {
     log('OK', now, result.delay, '复测恢复正常');
