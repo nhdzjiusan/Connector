@@ -9,19 +9,21 @@ namespace PeripheralPower;
 internal enum DeviceKind { Mouse, Keyboard, Headset }
 
 internal sealed record BatteryReading(string Id, string Name, DeviceKind Kind, int Percent, bool Charging,
-    string Connection, bool IsReference = false)
+    string Connection, bool IsReference = false, bool FullOnPower = false)
 {
-    public string PowerStatus => IsReference ? "已接电源 · 参考电量" : Charging ? "充电中" : "";
+    public string PowerStatus => FullOnPower ? "已充满 · 电源已连接" :
+        Charging && IsReference ? "充电中 · 参考电量" : Charging ? "充电中" :
+        IsReference ? "已接电源 · 参考电量" : "";
 }
 
 internal static class UsbBattery
 {
-    private readonly record struct BatterySample(int Percent, bool Charging, bool IsReference = false);
+    private readonly record struct BatterySample(int Percent, bool Charging, bool IsReference = false, bool FullOnPower = false);
     private sealed record Protocol(int Vendor, int Product, uint Usage, string Name, DeviceKind Kind);
     private static readonly Protocol[] Protocols =
     [
-        new(0x3837, 0x4245, 0xFF010010, "MCHOSE G3 V2", DeviceKind.Mouse),
         new(0x3837, 0x418C, 0xFF010010, "MCHOSE G3 V2", DeviceKind.Mouse),
+        new(0x3837, 0x4245, 0xFF010010, "MCHOSE G3 V2", DeviceKind.Mouse),
         new(0x3837, 0x201B, 0xFF020002, "MCHOSE G87 V2", DeviceKind.Keyboard),
         new(0x291D, 0x385D, 0xFF900001, "MCHOSE G9 Pro", DeviceKind.Headset)
     ];
@@ -66,7 +68,7 @@ internal static class UsbBattery
                     var name = protocol.Kind == DeviceKind.Headset ? device.GetProductName() : protocol.Name;
                     return new BatteryReading($"usb-{protocol.Kind}", name, protocol.Kind,
                         battery.Percent, battery.Charging, protocol.Product == 0x418C ? "USB" : "2.4 GHz",
-                        battery.IsReference);
+                        battery.IsReference, battery.FullOnPower);
                 }
             }
             catch (Exception ex) when (ex is IOException or TimeoutException or UnauthorizedAccessException or NotSupportedException)
@@ -89,8 +91,11 @@ internal static class UsbBattery
 
         var reply = Exchange(device, stream, [0, 0x55, 0x30, 0xA5, 0x0B, 0x2E, 1, 1, 1],
             data => data.Length >= 11 && data[1] == 0xAA && data[2] == 0x30 && data[9] <= 100, diagnostic);
-        return reply == null ? null : new BatterySample(reply[9], reply[10] == 1);
+        return reply == null ? null : MouseSample(reply[9], reply[10], receiver);
     }
+
+    private static BatterySample MouseSample(int percent, byte status, bool receiver) =>
+        new(percent, status == 1, FullOnPower: percent == 100 && (!receiver || status == 1));
 
     private static BatterySample? ReadKeyboard(HidDevice device, HidStream stream, Action<string>? diagnostic)
     {
@@ -102,7 +107,14 @@ internal static class UsbBattery
         var reply = Exchange(device, stream, request,
             data => data.Length == 20 && data[0] == 0x13 && data[1] == 0x4A &&
                 data[4] >= 2 && data[5] <= 100 && Checksum(data.AsSpan(0, 19)) == data[19], diagnostic);
-        return reply == null ? null : new BatterySample(reply[5], (reply[6] >> 4) == 1 && (reply[6] & 15) != 1);
+        return reply == null ? null : KeyboardSample(reply[5], reply[6]);
+    }
+
+    private static BatterySample KeyboardSample(int percent, byte status)
+    {
+        bool plugged = (status >> 4) == 1;
+        bool full = plugged && ((status & 15) == 1 || percent == 100);
+        return new BatterySample(percent, plugged && !full, FullOnPower: full);
     }
 
     private static byte Checksum(ReadOnlySpan<byte> data)
@@ -117,8 +129,11 @@ internal static class UsbBattery
         var reply = Exchange(device, stream, [0x55, 0x65, 1], IsHeadsetBatteryReply, diagnostic);
         if (reply == null) return null;
         // While plugged in, the headset can keep reporting the level from before charging.
-        return new BatterySample(reply[2], Charging: reply[3] == 3, IsReference: reply[3] is 0 or 3);
+        return HeadsetSample(reply[2], reply[3]);
     }
+
+    private static BatterySample HeadsetSample(int percent, byte status) =>
+        new(percent, Charging: status == 3, IsReference: status is 0 or 3, FullOnPower: status == 4);
 
     private static bool IsHeadsetBatteryReply(byte[] data)
     {

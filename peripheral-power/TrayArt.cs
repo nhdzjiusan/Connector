@@ -121,11 +121,11 @@ internal static class TrayArt
         _ => "耳机"
     };
 
-    public static void DeviceGlyph(Graphics g, DeviceKind kind, float x, float y)
+    public static void DeviceGlyph(Graphics g, DeviceKind kind, float x, float y, Color? color = null)
     {
         var state = g.Save();
         g.TranslateTransform(x, y);
-        using var pen = new Pen(DeviceColor(kind), 1.8f)
+        using var pen = new Pen(color ?? DeviceColor(kind), 1.8f)
         {
             StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round
         };

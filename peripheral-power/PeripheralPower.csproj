@@ -10,10 +10,11 @@
     <AssemblyName>PeripheralPower</AssemblyName>
     <ApplicationIcon>App.ico</ApplicationIcon>
     <Product>外设电量</Product>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
     <PackageReference Include="HidSharp" Version="2.6.4" />
     <EmbeddedResource Include="HidSharp-LICENSE.txt" />
   </ItemGroup>

@@ -109,7 +109,7 @@ internal sealed class PowerContext : ApplicationContext
     private readonly BatteryPanel panel = new();
     private readonly System.Windows.Forms.Timer poll = new();
     private readonly System.Windows.Forms.Timer deviceDelay = new() { Interval = 1100 };
-    private readonly Dictionary<string, TrayReading> icons = [];
+    private readonly TaskbarStrip strip = new();
     private readonly ContextMenuStrip menu = new();
     private readonly NotifyIcon launcher = new();
     private readonly Icon launcherIcon = TrayArt.MakeLauncher();
@@ -120,20 +120,6 @@ internal sealed class PowerContext : ApplicationContext
     private bool running;
     private bool queued;
     private bool closing;
-
-    private sealed class TrayReading(NotifyIcon icon, Icon drawing, BatteryReading battery) : IDisposable
-    {
-        public NotifyIcon Icon { get; } = icon;
-        public Icon Drawing { get; set; } = drawing;
-        public BatteryReading Battery { get; set; } = battery;
-
-        public void Dispose()
-        {
-            Icon.Visible = false;
-            Icon.Dispose();
-            Drawing.Dispose();
-        }
-    }
 
     public PowerContext(EventWaitHandle openPanel)
     {
@@ -160,6 +146,9 @@ internal sealed class PowerContext : ApplicationContext
         launcher.Text = "外设电量";
         ConfigureIcon(launcher);
         launcher.Visible = true;
+        strip.ContextMenuStrip = menu;
+        strip.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowPanel(Cursor.Position); };
+        strip.AvailabilityChanged += visible => launcher.Visible = !visible;
 
         poll.Interval = checked(panel.IntervalMinutes * 60_000);
         poll.Tick += (_, _) => _ = RefreshAsync();
@@ -267,7 +256,7 @@ internal sealed class PowerContext : ApplicationContext
                 .GroupBy(reading => reading.Id).Select(group => group.First())
                 .OrderBy(reading => reading.Kind).ThenBy(reading => reading.Name).ToArray();
             updated = DateTime.Now;
-            UpdateTray();
+            strip.SetDevices(readings);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
         {
@@ -288,46 +277,6 @@ internal sealed class PowerContext : ApplicationContext
         }
     }
 
-    private void UpdateTray()
-    {
-        var present = readings.Select(battery => battery.Id).ToHashSet();
-        foreach (var id in icons.Keys.Where(id => !present.Contains(id)).ToArray())
-        {
-            icons[id].Dispose();
-            icons.Remove(id);
-        }
-
-        foreach (var battery in readings)
-        {
-            if (icons.TryGetValue(battery.Id, out var entry))
-            {
-                if (entry.Battery == battery) continue;
-                var previous = entry.Drawing;
-                entry.Drawing = TrayArt.MakeReading(battery);
-                entry.Icon.Icon = entry.Drawing;
-                entry.Icon.Text = Tooltip(battery);
-                entry.Battery = battery;
-                previous.Dispose();
-                continue;
-            }
-
-            var picture = TrayArt.MakeReading(battery);
-            var icon = new NotifyIcon { Icon = picture, Text = Tooltip(battery) };
-            ConfigureIcon(icon);
-            icons.Add(battery.Id, new TrayReading(icon, picture, battery));
-            icon.Visible = true;
-        }
-
-        launcher.Visible = icons.Count == 0;
-    }
-
-    private static string Tooltip(BatteryReading battery)
-    {
-        var text = $"{battery.Percent}% · {battery.Name}";
-        if (battery.PowerStatus.Length > 0) text += $" · {battery.PowerStatus}";
-        return text.Length <= 63 ? text : text[..62] + "…";
-    }
-
     protected override void ExitThreadCore()
     {
         if (closing) return;
@@ -338,7 +287,7 @@ internal sealed class PowerContext : ApplicationContext
         if (watcher?.Status is DeviceWatcherStatus.Started or DeviceWatcherStatus.EnumerationCompleted) watcher.Stop();
         poll.Dispose();
         deviceDelay.Dispose();
-        foreach (var entry in icons.Values) entry.Dispose();
+        strip.Dispose();
         launcher.Visible = false;
         launcher.Dispose();
         launcherIcon.Dispose();
