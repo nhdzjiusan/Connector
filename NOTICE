@@ -1,0 +1,9 @@
+PeripheralPower and Clash Guard: Copyright (c) 2026 Connector contributors (MIT).
+
+PeripheralPower includes HidSharp 2.6.4.
+HIDSharp
+Copyright 2010-2025 James F. Bellinger <http://software.seekye.com/hidsharp>
+Licensed under the Apache License, Version 2.0.
+The complete upstream notice and license are in peripheral-power/HidSharp-LICENSE.txt
+and embedded in the application. The self-contained distribution includes the
+Microsoft .NET runtime, subject to its own license and third-party notices.

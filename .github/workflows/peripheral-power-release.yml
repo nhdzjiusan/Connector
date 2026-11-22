@@ -1,0 +1,49 @@
+name: Publish PeripheralPower
+on:
+  push:
+    tags: ['peripheral-power-v*']
+permissions:
+  contents: write
+concurrency:
+  group: peripheral-power-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build and verify the single-file release
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -cnotmatch '^peripheral-power-v(\d+\.\d+\.\d+)$') { throw "Invalid tag" }
+          $version = $Matches[1]
+          $project = 'peripheral-power/PeripheralPower.csproj'
+          if (([xml](Get-Content $project -Raw)).Project.PropertyGroup.Version -ne $version) { throw "Tag/project version mismatch" }
+          dotnet publish $project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o publish
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $name = "PeripheralPower-$version-win-x64.exe"
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item publish/PeripheralPower.exe "dist/$name"
+          $actual = & "./dist/$name" --version | Out-String
+          if ($LASTEXITCODE -or $actual.Trim() -ne $version) { throw "Version smoke test failed: $actual" }
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content "dist/$name.sha256" "$hash  $name" -Encoding ascii
+      - name: Create or update tagged release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag --json tagName
+          if ($LASTEXITCODE) {
+            gh release create $tag --verify-tag --draft --title $tag --generate-notes
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          $assets = (Get-ChildItem dist -File).FullName
+          gh release upload $tag @assets --clobber
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          gh release edit $tag --draft=false

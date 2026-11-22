@@ -27,6 +27,10 @@ Windows 10 2004 及更新版本的 x64 托盘应用。独立发布的可执行�
 
 ## 构建
 
+### 验证下载
+
+从同一 Release 下载 `PeripheralPower-1.2.0-win-x64.exe` 和同名的 `.exe.sha256`（按所选版本替换 1.2.0）。在下载目录运行 `certutil -hashfile PeripheralPower-1.2.0-win-x64.exe SHA256`。忽略大小写和空格，对比结果与校验文件第一列的全部 64 个十六进制字符，一致后再运行。版本化命名适用于新流水线发布的附件。
+
 在 Windows 安装 .NET 10 SDK，在项目目录运行以下命令。
 
     dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true

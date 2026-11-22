@@ -11,11 +11,16 @@
     <ApplicationIcon>App.ico</ApplicationIcon>
     <Product>外设电量</Product>
     <Version>1.2.0</Version>
+    <FileVersion>$(Version).0</FileVersion>
+    <AssemblyVersion>$(Version).0</AssemblyVersion>
+    <Company>Connector contributors</Company>
+    <Copyright>Copyright © 2026 Connector contributors</Copyright>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
     <PackageReference Include="HidSharp" Version="2.6.4" />
     <EmbeddedResource Include="HidSharp-LICENSE.txt" />
+    <EmbeddedResource Include="../NOTICE" Link="NOTICE" />
   </ItemGroup>
 </Project>
