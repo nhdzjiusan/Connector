@@ -13,6 +13,16 @@ Connector 收录两个独立的 Windows 工具。外设电量面向 Windows 10 2
 | --- | --- |
 | ![浅色](peripheral-power/docs/light.png) | ![深色](peripheral-power/docs/dark.png) |
 
+## 实机兼容设备矩阵
+
+| 设备或接入方式 | 验证状态 | 支持范围 |
+| --- | --- | --- |
+| MCHOSE G3 V2 | 已实机读取 2.4 GHz 电量 | 内置无线与 USB 有线规则。同组有线优先已通过模拟验证。 |
+| MCHOSE G87 V2 | 已实机读取 2.4 GHz 电量 | 内置接收器规则。 |
+| MCHOSE G9 Pro | 已实机读取 2.4 GHz 电量 | 内置接收器规则。供电状态不明确时保留参考读数。 |
+| 标准 BLE 外设 | 实现了标准协议，具体型号需实测 | 使用 Battery Service 的 Battery Level 特征。支持轮询，有 Notify 时尝试订阅。 |
+| 其他私有 HID 外设 | 由规则作者实测 | 可在本机加载自定义 JSON 电量规则，先用脱敏帧离线验证。[规则格式与加载路径](peripheral-power/docs/hid-rules.md) |
+
 ## 下载与验证
 
 在 [Releases](https://github.com/nhdzjiusan/Connector/releases) 选择以 `peripheral-power-v` 开头的标签。新版附件由版本化 exe 及同名 `.sha256` 组成。例如运行 `certutil -hashfile PeripheralPower-1.2.1-win-x64.exe SHA256`，逐字比对同一 Release 校验文件中的哈希。下载后可直接在普通用户账号运行。

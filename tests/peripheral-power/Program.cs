@@ -32,6 +32,7 @@ internal static class Checks
         HidRuleChecks.CheckScanIntegration(Require);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
+        RefreshChecks.Run(Require);
         var area = new Rectangle(-200, 0, 200, 40);
         var geometry = new object[,]
         {

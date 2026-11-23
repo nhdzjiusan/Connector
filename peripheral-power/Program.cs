@@ -189,18 +189,21 @@ internal sealed class PowerContext : ApplicationContext
     private bool startupEnabled;
     private string? startupWarning, lastWarning;
     private readonly System.Windows.Forms.Timer poll = new();
-    private readonly System.Windows.Forms.Timer deviceDelay = new() { Interval = 1100 };
+    private readonly System.Windows.Forms.Timer deviceDelay = new();
+    private readonly RefreshDebounce refreshEvents = new();
+    private int postedSignals;
     private readonly TaskbarStrip strip = new();
     private readonly ContextMenuStrip menu = new();
     private readonly NotifyIcon launcher = new();
     private readonly Icon launcherIcon = TrayArt.MakeLauncher();
     private readonly RegisteredWaitHandle openWait;
     private readonly DeviceWatcher? watcher;
+    private readonly DeviceChangeWindow deviceWindow;
+    private readonly BluetoothBattery.Notifications bluetoothNotifications;
     private BatteryReading[] readings = [];
     private DateTime? updated;
     private bool running;
-    private bool queued;
-    private bool closing;
+    private volatile bool closing;
     private bool restartOffered;
     private bool usbChanged, bleChanged;
 
@@ -237,15 +240,14 @@ internal sealed class PowerContext : ApplicationContext
         poll.Interval = checked(minutes * 60_000);
         poll.Tick += (_, _) => _ = RefreshAsync();
         poll.Start();
-        deviceDelay.Tick += (_, _) =>
-        {
-            deviceDelay.Stop();
-            _ = RefreshAsync(queueIfRunning: true);
-        };
+        deviceDelay.Tick += (_, _) => ProcessRefreshEvents();
 
+        deviceWindow = new(() => SignalRefresh(RefreshSignal.Usb));
+        bluetoothNotifications = new(() => SignalRefresh(RefreshSignal.BluetoothValue),
+            () => SignalRefresh(RefreshSignal.Bluetooth));
         DeviceList.Local.Changed += DeviceChanged;
         SystemEvents.PowerModeChanged += PowerChanged;
-        try { watcher = BluetoothBattery.Watch(() => OnUi(() => { bleChanged = true; QueueDeviceRefresh(); })); }
+        try { watcher = BluetoothBattery.Watch(() => SignalRefresh(RefreshSignal.Bluetooth)); }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or UnauthorizedAccessException)
         { ErrorLog.Write("蓝牙设备监听",ex); }
         openWait = ThreadPool.RegisterWaitForSingleObject(openPanel, (_, _) => OnUi(() => ShowPanel()), null, -1, false);
@@ -305,20 +307,65 @@ internal sealed class PowerContext : ApplicationContext
     });
 
     private void DeviceChanged(object? sender, DeviceListChangedEventArgs args) =>
-        OnUi(() => { usbChanged = true; QueueDeviceRefresh(); });
+        SignalRefresh(RefreshSignal.Usb);
 
     private void PowerChanged(object sender, PowerModeChangedEventArgs args)
     {
-        if (args.Mode == PowerModes.Resume) QueueDeviceRefresh();
+        if (args.Mode == PowerModes.Resume) SignalRefresh(RefreshSignal.Resume);
     }
 
-    private void QueueDeviceRefresh()
+    private void SignalRefresh(RefreshSignal signal)
     {
+        if (closing || Interlocked.Or(ref postedSignals, (int)signal) != 0) return;
         OnUi(() =>
         {
-            deviceDelay.Stop();
-            deviceDelay.Start();
+            var pending = (RefreshSignal)Interlocked.Exchange(ref postedSignals, 0);
+            refreshEvents.Add(pending, Environment.TickCount64);
+            ArmRefreshTimer();
         });
+    }
+
+    private void ArmRefreshTimer()
+    {
+        deviceDelay.Stop();
+        if (closing || running || refreshEvents.Pending == RefreshSignal.None) return;
+        deviceDelay.Interval = Math.Max(1, refreshEvents.Delay(Environment.TickCount64));
+        deviceDelay.Start();
+    }
+
+    private void ProcessRefreshEvents()
+    {
+        deviceDelay.Stop();
+        if (closing || running) return;
+        if (refreshEvents.Delay(Environment.TickCount64) > 0) { ArmRefreshTimer(); return; }
+        var signals = refreshEvents.Take();
+        if ((signals & RefreshSignal.Resume) != 0) bluetoothNotifications.Reset();
+        if ((signals & RefreshSignal.BluetoothValue) != 0) ApplyBluetoothNotifications();
+        var scan = signals & ~RefreshSignal.BluetoothValue;
+        if (scan == RefreshSignal.None) return;
+        usbChanged |= (scan & (RefreshSignal.Usb | RefreshSignal.Resume)) != 0;
+        bleChanged |= (scan & (RefreshSignal.Bluetooth | RefreshSignal.Resume)) != 0;
+        _ = RefreshAsync();
+    }
+
+    private void ApplyBluetoothNotifications()
+    {
+        var fresh = bluetoothNotifications.TakeUpdates();
+        if (fresh.Length == 0) return;
+        var now = DateTime.Now;
+        readings = MergeBluetoothNotifications(readings, fresh, now);
+        updated = now;
+        strip.SetDevices(readings);
+        UpdateFallback();
+        NotifyLow();
+        panel?.SetData(readings, updated, busy: false);
+    }
+
+    internal static BatteryReading[] MergeBluetoothNotifications(BatteryReading[] old, BatteryReading[] fresh, DateTime now)
+    {
+        var ids = fresh.Select(row => row.Id).ToHashSet(StringComparer.Ordinal);
+        return old.Where(row => !ids.Contains(row.Id)).Concat(fresh.Select(row => row with { SampledAt = now }))
+            .OrderBy(row => row.Kind).ThenBy(row => row.Name).ToArray();
     }
 
     private void OnUi(Action action)
@@ -364,16 +411,13 @@ internal sealed class PowerContext : ApplicationContext
         }
     }
 
-    private async Task RefreshAsync(bool queueIfRunning = false)
+    private async Task RefreshAsync()
     {
-        if (closing) return;
-        if (running)
-        {
-            queued |= queueIfRunning;
-            return;
-        }
+        if (closing || running) return;
 
         running = true;
+        refreshEvents.ScanStarted(Environment.TickCount64);
+        deviceDelay.Stop();
         bool removeUsb = usbChanged, removeBle = bleChanged;
         usbChanged = bleChanged = false;
         string? warning = null;
@@ -381,7 +425,7 @@ internal sealed class PowerContext : ApplicationContext
         try
         {
             var usb = SafePoll("USB", () => UsbBattery.ReadAsync());
-            var bluetooth = SafePoll("蓝牙", BluetoothBattery.ReadAsync);
+            var bluetooth = SafePoll("蓝牙", () => BluetoothBattery.ReadAsync(bluetoothNotifications));
             await Task.WhenAll(usb, bluetooth);
             if (closing) return;
             var now = DateTime.Now;
@@ -404,16 +448,13 @@ internal sealed class PowerContext : ApplicationContext
         finally
         {
             running = false;
+            refreshEvents.ScanFinished(Environment.TickCount64);
             if (!closing)
             {
                 lastWarning = warning;
                 panel?.SetData(readings, updated, busy: false);
                 if (warning != null) panel?.Report(warning);
-                if (queued)
-                {
-                    queued = false;
-                    dispatcher.BeginInvoke(() => _ = RefreshAsync());
-                }
+                ArmRefreshTimer();
             }
         }
     }
@@ -495,6 +536,8 @@ internal sealed class PowerContext : ApplicationContext
         SystemEvents.PowerModeChanged -= PowerChanged;
         DeviceList.Local.Changed -= DeviceChanged;
         if (watcher?.Status is DeviceWatcherStatus.Started or DeviceWatcherStatus.EnumerationCompleted) watcher.Stop();
+        deviceWindow.Dispose();
+        bluetoothNotifications.Dispose();
         poll.Dispose();
         deviceDelay.Dispose();
         strip.Dispose();
