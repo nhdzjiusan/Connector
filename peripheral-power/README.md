@@ -58,7 +58,7 @@ USB 启动时加载内置电量规则，并从 `%LOCALAPPDATA%\PeripheralPower\r
 
 ## 验证下载与签名
 
-从同一 Release 下载 `PeripheralPower-1.2.1-win-x64.exe` 和同名的 `.exe.sha256`（按所选版本替换 1.2.1）。在下载目录运行 `certutil -hashfile PeripheralPower-1.2.1-win-x64.exe SHA256`。忽略大小写和空格，对比结果与校验文件第一列的全部 64 个十六进制字符，一致后再运行。版本化命名适用于新流水线发布的附件。
+从同一 Release 下载 `PeripheralPower-1.2.2-win-x64.exe` 和同名的 `.exe.sha256`（按所选版本替换 1.2.2）。在下载目录运行 `certutil -hashfile PeripheralPower-1.2.2-win-x64.exe SHA256`。忽略大小写和空格，对比结果与校验文件第一列的全部 64 个十六进制字符，一致后再运行。版本化命名适用于新流水线发布的附件。
 
 发布流程未配置 Authenticode 签名。可用 `Get-AuthenticodeSignature .\PeripheralPower-1.2.0-win-x64.exe` 检查具体文件。遇到杀软告警时先核对来源和哈希，保留告警名，通过安全软件厂商误报渠道复核。当前没有已验证的 VirusTotal 扫描结论；可在其网站搜索对应附件的 SHA-256。没有报告应记录为“未知”。
 

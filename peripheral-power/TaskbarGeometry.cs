@@ -31,7 +31,8 @@ internal static class TaskbarGeometry
 
     internal static Rectangle[] OccupiedBounds(object[,]? rows, Rectangle bar)
     {
-        if (rows is null || rows.GetLength(1) < 6 || rows.GetLowerBound(0) != 0 || rows.GetLowerBound(1) != 0) return [];
+        if (rows is null || rows.GetLength(0) > 16_384 || rows.GetLength(1) < 6 ||
+            rows.GetLowerBound(0) != 0 || rows.GetLowerBound(1) != 0) return [];
         var spans = new List<Rectangle>();
         for (int i = 1; i < rows.GetLength(0); i++)
         {
@@ -51,6 +52,13 @@ internal static class TaskbarGeometry
                     (int)Math.Ceiling(right), (int)Math.Ceiling(bottom)));
         }
         return spans.ToArray();
+    }
+
+    internal static bool HasTaskEvidence(Rectangle bar, Rectangle tray, Rectangle[] occupied)
+    {
+        var nativeTray = Rectangle.Intersect(bar, tray);
+        return nativeTray.Width > 0 && nativeTray.Height >= bar.Height / 2 &&
+            occupied.Any(area => !nativeTray.Contains(area) && bar.IntersectsWith(area));
     }
 
     internal static bool IsAnchoredBar(Rectangle bar, Rectangle screen)
