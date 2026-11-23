@@ -1,0 +1,481 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PeripheralPower local HID rule v1",
+  "$comment": "Editor schema for user files. The application's loader also verifies semantic relationships, scopes vendor collections, checks installed report IDs and applies the compiled-in driver and override policy.",
+  "oneOf": [
+    { "$ref": "#/$defs/rule" },
+    { "$ref": "#/$defs/document" }
+  ],
+  "$defs": {
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rules"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/rule" },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "match",
+        "query",
+        "response",
+        "parse"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "kind": {
+          "enum": [
+            "mouse",
+            "keyboard",
+            "headset",
+            "generic"
+          ]
+        },
+        "match": { "$ref": "#/$defs/match" },
+        "query": { "$ref": "#/$defs/query" },
+        "response": { "$ref": "#/$defs/response" },
+        "parse": { "$ref": "#/$defs/parse" }
+      },
+      "if": {
+        "properties": {
+          "match": {
+            "not": {
+              "required": [
+                "usagePage"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "match": {
+            "required": [
+              "interface"
+            ],
+            "properties": {
+              "interface": {
+                "required": [
+                  "inputReportId"
+                ]
+              }
+            }
+          },
+          "query": {
+            "properties": {
+              "mode": {
+                "const": "passive_listen"
+              }
+            }
+          }
+        }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vid",
+        "pids",
+        "deviceGroup",
+        "transport",
+        "priority"
+      ],
+      "properties": {
+        "vid": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "pids": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "usagePage": { "type": "integer", "minimum": 65281, "maximum": 65535 },
+        "usage": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "deviceGroup": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+        },
+        "transport": {
+          "enum": [
+            "wired",
+            "receiver"
+          ]
+        },
+        "priority": { "type": "integer", "minimum": -1000, "maximum": 1000 },
+        "minInput": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "minOutput": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "minFeature": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "interface": { "$ref": "#/$defs/interface" }
+      },
+      "dependentRequired": {
+        "usagePage": [
+          "usage"
+        ],
+        "usage": [
+          "usagePage"
+        ]
+      }
+    },
+    "interface": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputReportId": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "outputReportId": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "featureReportId": { "type": "integer", "minimum": 0, "maximum": 255 }
+      },
+      "minProperties": 1
+    },
+    "query": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "length",
+            "bytes"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "output_then_input",
+                "feature_set_get"
+              ]
+            },
+            "length": { "type": "integer", "minimum": 1, "maximum": 4096 },
+            "bytes": {
+              "type": "object",
+              "required": [
+                "0"
+              ],
+              "propertyNames": {
+                "pattern": "^(0|[1-9][0-9]{0,3})$"
+              },
+              "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 255 }
+            },
+            "checksum": { "$ref": "#/$defs/checksum" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "reportId"
+          ],
+          "properties": {
+            "mode": {
+              "const": "feature_get_only"
+            },
+            "reportId": { "type": "integer", "minimum": 0, "maximum": 255 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "const": "passive_listen"
+            }
+          }
+        }
+      ]
+    },
+    "checksum": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "none",
+            "xor",
+            "sum8",
+            "sub_from_const_8",
+            "crc8"
+          ]
+        },
+        "start": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "end": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "index": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "constant": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "polynomial": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "initial": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "xorOut": { "type": "integer", "minimum": 0, "maximum": 255 }
+      },
+      "if": {
+        "properties": {
+          "kind": {
+            "not": {
+              "const": "none"
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "start",
+          "end",
+          "index"
+        ]
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minLength"
+      ],
+      "properties": {
+        "minLength": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "exactLength": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "maxReads": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "expect": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/test" },
+            "minItems": 1,
+            "maxItems": 16
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "asleepWhen": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/test" },
+            "minItems": 1,
+            "maxItems": 16
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "invalidWhen": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/test" },
+            "minItems": 1,
+            "maxItems": 16
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "checksum": { "$ref": "#/$defs/checksum" }
+      }
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index"
+      ],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "equal": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "min": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "max": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "mask": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "shift": { "type": "integer", "minimum": 0, "maximum": 7 }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "equal"
+          ]
+        },
+        {
+          "required": [
+            "min"
+          ]
+        },
+        {
+          "required": [
+            "max"
+          ]
+        }
+      ]
+    },
+    "parse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level"
+      ],
+      "properties": {
+        "level": { "$ref": "#/$defs/level" },
+        "states": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/state" },
+          "minItems": 0,
+          "maxItems": 16
+        },
+        "defaultPower": { "$ref": "#/$defs/power" }
+      }
+    },
+    "level": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "decode"
+      ],
+      "properties": {
+        "field": { "$ref": "#/$defs/field" },
+        "decode": {
+          "enum": [
+            "percent",
+            "scale",
+            "lookup",
+            "voltage_mv"
+          ]
+        },
+        "factor": {
+          "type": "number"
+        },
+        "offset": {
+          "type": "number"
+        },
+        "values": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(0|[1-9][0-9]{0,4})$"
+          },
+          "minProperties": 1,
+          "maxProperties": 256,
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 100 }
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "millivolts",
+              "percent"
+            ],
+            "properties": {
+              "millivolts": { "type": "integer", "minimum": 0, "maximum": 65535 },
+              "percent": { "type": "integer", "minimum": 0, "maximum": 100 }
+            }
+          },
+          "minItems": 2,
+          "maxItems": 32
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "decode": {
+                "const": "lookup"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decode": {
+                "const": "voltage_mv"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "points"
+            ]
+          }
+        }
+      ]
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index"
+      ],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "bigEndian": {
+          "type": "boolean"
+        },
+        "mask": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "shift": { "type": "integer", "minimum": 0, "maximum": 15 }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "power",
+        "when"
+      ],
+      "properties": {
+        "power": { "$ref": "#/$defs/power" },
+        "when": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/test" },
+            "minItems": 1,
+            "maxItems": 16
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "isReference": {
+          "type": "boolean"
+        }
+      }
+    },
+    "power": {
+      "enum": [
+        "discharging",
+        "charging",
+        "full",
+        "external_reference",
+        "unknown"
+      ]
+    }
+  }
+}

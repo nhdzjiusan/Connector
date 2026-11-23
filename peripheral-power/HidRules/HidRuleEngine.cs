@@ -6,21 +6,34 @@ internal interface IHidReportChannel
     byte[]? ReadInput();
     void SetFeature(byte[] report);
     byte[]? GetFeature(byte reportId);
+    void BeginPhase(int phase) { }
 }
+
+internal readonly record struct HidProtocolEvent(int Phase, string Stage, string Direction, string ReportType, byte[]? Frame, string? Reason = null);
 
 internal static class HidRuleEngine
 {
     internal static HidRuleResult Execute(HidRule rule, HidRuleDocument catalog, IHidReportChannel channel,
-        Action<byte[], string>? onFrame = null)
+        Action<byte[], string>? onFrame = null, Action<HidProtocolEvent>? trace = null)
     {
-        if (rule.BuiltinDriver is null) return Execute(rule.Transaction, channel, onFrame: onFrame);
-
-        // The receiver needs a successful availability probe before the battery exchange.
-        // Both exchanges still use the same declarative parser and the same open channel.
-        var phases = catalog.DriverSteps![rule.BuiltinDriver];
-        var status = Execute(phases[0], channel, onFrame: onFrame);
-        return status.Disposition == HidDisposition.Accepted
-            ? Execute(phases[1], channel, onFrame: onFrame) : status;
+        int phase = 1;
+        HidRuleResult Exchange(HidTransaction transaction, int index)
+        {
+            phase = index;
+            return Execute(transaction, channel, onFrame: onFrame, trace: trace, phase: index,
+                inputReportId: rule.Match.Interface?.InputReportId);
+        }
+        var outcome = rule.BuiltinDriver is { } driver
+            ? HidBuiltinDrivers.Execute(driver, catalog.DriverSteps![driver], Exchange)
+            : Exchange(rule.Transaction, 1);
+        trace?.Invoke(new(phase, "outcome", "none", "none", null, outcome.Disposition switch
+        {
+            HidDisposition.Accepted => "accepted",
+            HidDisposition.Asleep => "asleep",
+            HidDisposition.Invalid => "invalid",
+            _ => "no_match"
+        }));
+        return outcome;
     }
 
     internal static byte[] BuildQuery(HidQuery query)
@@ -37,24 +50,42 @@ internal static class HidRuleEngine
     }
 
     internal static HidRuleResult Execute(HidTransaction transaction, IHidReportChannel channel,
-        Action<byte[]>? onQuery = null, Action<byte[], string>? onFrame = null)
+        Action<byte[]>? onQuery = null, Action<byte[], string>? onFrame = null,
+        Action<HidProtocolEvent>? trace = null, int phase = 1, int? inputReportId = null)
     {
+        channel.BeginPhase(phase);
         var query = BuildQuery(transaction.Query);
         var mode = transaction.Query.Mode;
+        bool feature = mode is HidQueryMode.FeatureSetGet or HidQueryMode.FeatureGetOnly;
         onQuery?.Invoke(query);
+        trace?.Invoke(new(phase, "query", mode == HidQueryMode.PassiveListen ? "none" : "tx",
+            feature ? "feature" : mode == HidQueryMode.PassiveListen ? "input" : "output", query));
         if (mode == HidQueryMode.OutputThenInput) channel.WriteOutput(query);
         if (mode == HidQueryMode.FeatureSetGet) channel.SetFeature(query);
 
+        bool invalidValue = false;
         for (int read = 0; read < transaction.Response.MaxReads; read++)
         {
-            var frame = mode is HidQueryMode.FeatureSetGet or HidQueryMode.FeatureGetOnly
-                ? channel.GetFeature(query[0]) : channel.ReadInput();
+            var frame = feature ? channel.GetFeature(query[0]) : channel.ReadInput();
             if (frame is null) break;
-            var result = Inspect(transaction, frame, out string reason);
+            HidRuleResult result;
+            string reason;
+            if (!feature && inputReportId is int id && frame.Length > 0 && frame[0] != id)
+            {
+                result = new(HidDisposition.NoMatch);
+                reason = "report_id";
+            }
+            else result = Inspect(transaction, frame, out reason);
             onFrame?.Invoke(frame, reason);
+            trace?.Invoke(new(phase, "receive", "rx", feature ? "feature" : "input", frame, reason));
+            if (result.Disposition == HidDisposition.Invalid)
+            {
+                invalidValue = true;
+                continue;
+            }
             if (result.Disposition != HidDisposition.NoMatch) return result;
         }
-        return new(HidDisposition.NoMatch);
+        return new(invalidValue ? HidDisposition.Invalid : HidDisposition.NoMatch);
     }
 
     private static HidRuleResult Inspect(HidTransaction transaction, ReadOnlySpan<byte> frame, out string reason)
@@ -80,6 +111,11 @@ internal static class HidRuleEngine
         {
             reason = "asleep";
             return new(HidDisposition.Asleep);
+        }
+        if (response.InvalidWhen is { } invalid && Matches(frame, invalid))
+        {
+            reason = "invalid_when";
+            return new(HidDisposition.NoMatch);
         }
         if (transaction.Parse is not { } parse)
         {

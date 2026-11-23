@@ -8,11 +8,21 @@ using Microsoft.Win32.SafeHandles;
 namespace PeripheralPower;
 
 internal sealed class HidSharpReportChannel(HidDevice device, HidStream stream, DeviceItem collection,
-    Stopwatch scan, int budgetMs, CancellationToken cancellation, bool allowUndescribedOutput) : IHidReportChannel
+    Stopwatch scan, int budgetMs, CancellationToken cancellation, bool allowUndescribedOutput,
+    Action<HidProtocolEvent>? trace = null) : IHidReportChannel
 {
     private readonly Stopwatch inputWindow = new();
     private byte[]? output;
     private bool usedControl;
+    private int phase;
+
+    public void BeginPhase(int index)
+    {
+        phase = index;
+        output = null;
+        usedControl = false;
+        inputWindow.Reset();
+    }
 
     public void WriteOutput(byte[] report)
     {
@@ -21,6 +31,7 @@ internal sealed class HidSharpReportChannel(HidDevice device, HidStream stream, 
         try
         {
             stream.WriteTimeout = Timeout(550);
+            trace?.Invoke(new(phase, "send", "tx", "output", output, "stream_write"));
             stream.Write(output);
         }
         catch (Exception ex) when (!cancellation.IsCancellationRequested && ex is (TimeoutException or IOException))
@@ -46,7 +57,9 @@ internal sealed class HidSharpReportChannel(HidDevice device, HidStream stream, 
     public void SetFeature(byte[] report)
     {
         stream.WriteTimeout = Timeout(550);
-        stream.SetFeature(Pad(report, device.GetMaxFeatureReportLength(), collection.FeatureReports));
+        var buffer = Pad(report, device.GetMaxFeatureReportLength(), collection.FeatureReports);
+        trace?.Invoke(new(phase, "send", "tx", "feature", buffer, "set_feature"));
+        stream.SetFeature(buffer);
         cancellation.ThrowIfCancellationRequested();
     }
 
@@ -54,6 +67,7 @@ internal sealed class HidSharpReportChannel(HidDevice device, HidStream stream, 
     {
         stream.ReadTimeout = Timeout(500);
         var report = Pad([reportId], device.GetMaxFeatureReportLength(), collection.FeatureReports);
+        trace?.Invoke(new(phase, "request", "tx", "feature", [reportId], "get_feature"));
         stream.GetFeature(report);
         cancellation.ThrowIfCancellationRequested();
         return report;
@@ -83,11 +97,13 @@ internal sealed class HidSharpReportChannel(HidDevice device, HidStream stream, 
         using var control = File.OpenHandle(device.DevicePath, FileMode.Open, FileAccess.ReadWrite,
             FileShare.ReadWrite, FileOptions.Asynchronous);
         _ = Timeout(550);
+        trace?.Invoke(new(phase, "send", "tx", "output", output, "set_output_report"));
         // This native fallback can outlive the caller's wait on a stalled driver. The worker
         // keeps the device mutex until the native call returns, so a later scan cannot overlap.
         if (!HidD_SetOutputReport(control, output!, output!.Length))
         {
             stream.WriteTimeout = Timeout(550);
+            trace?.Invoke(new(phase, "send", "tx", "output", output, "stream_fallback"));
             stream.Write(output);
         }
     }
@@ -104,13 +120,18 @@ internal sealed class HidSharpReportChannel(HidDevice device, HidStream stream, 
     {
         if (capacity < report.Length || capacity > HidRuleLoader.MaxReportLength)
             throw new NotSupportedException("Query does not fit the device's report length.");
-        var descriptor = reports.FirstOrDefault(r => r.ReportID == report[0]);
-        if (descriptor is null ? !allowUndescribed || reports.Any() : descriptor.Length < report.Length)
+        if (!SupportsReport(reports, report[0], report.Length, allowUndescribed))
             throw new NotSupportedException("Report ID or length does not match the selected HID collection.");
         if (capacity == report.Length) return report;
         var padded = new byte[capacity];
         report.CopyTo(padded, 0);
         return padded;
+    }
+
+    internal static bool SupportsReport(IEnumerable<Report> reports, int id, int length, bool allowUndescribed)
+    {
+        var descriptor = reports.FirstOrDefault(r => r.ReportID == id);
+        return descriptor is null ? allowUndescribed && !reports.Any() : descriptor.Length >= length;
     }
 
     [DllImport("hid.dll", ExactSpelling = true)]

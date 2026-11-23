@@ -1,26 +1,96 @@
 using PeripheralPower;
+using System.Text.Json;
 
 internal static class HidRuleChecks
 {
     internal static void ValidateFile(string path, string id, string frameFile)
     {
-        var rule = HidRuleLoader.LoadExternalFile(path).SingleOrDefault(r => r.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidDataException($"Unknown rule ID: {id}");
+        var (rule, catalog) = ResolveRule(path, id);
         var frames = new List<byte[]>();
         foreach (var line in File.ReadLines(frameFile))
         {
             string hex = line.Split('#', 2)[0].Trim();
             if (hex.Length == 0) continue;
-            if (frames.Count == 16 || hex.Length > HidRuleLoader.MaxReportLength * 3)
-                throw new InvalidDataException("Replay requires at most 16 bounded response frames.");
-            frames.Add(Convert.FromHexString(string.Concat(hex.Where(c => !char.IsWhiteSpace(c)))));
+            if (frames.Count == 32 || hex.Length > HidRuleLoader.MaxReportLength * 3)
+                throw new InvalidDataException("Replay requires at most 32 bounded response frames.");
+            var bytes = Convert.FromHexString(string.Concat(hex.Where(c => !char.IsWhiteSpace(c))));
+            if (bytes.Length > HidRuleLoader.MaxReportLength) throw new InvalidDataException("Replay frame is too long.");
+            frames.Add(bytes);
         }
-        var result = HidRuleEngine.Execute(rule.Transaction, new Replay(frames),
-            query => Console.WriteLine(query.Length == 0 ? "query: passive" : $"query: {Convert.ToHexString(query)}"),
-            (frame, reason) => Console.WriteLine($"frame: {Convert.ToHexString(frame)} => {reason}"));
+        PrintReplay(rule, catalog, new Replay(frames));
+    }
+
+    internal static void ValidateDiagnostic(string path, string id, string diagnostic, string endpoint)
+    {
+        var (rule, catalog) = ResolveRule(path, id);
+        if (!int.TryParse(endpoint, out int endpointId) || endpointId <= 0)
+            throw new InvalidDataException("Expected a positive diagnostic endpoint ID.");
+        using var stream = File.OpenRead(diagnostic);
+        if (stream.Length > 8 * 1024 * 1024) throw new InvalidDataException("Diagnostic exceeds 8 MiB.");
+        var report = JsonSerializer.Deserialize(stream, ScanJsonContext.Default.ScanReport)
+            ?? throw new InvalidDataException("Missing diagnostic data.");
+        PrintReplay(rule, catalog, ReplayFromDiagnostic(report, endpointId));
+    }
+
+    private static (HidRule Rule, HidRuleDocument Catalog) ResolveRule(string path, string id)
+    {
+        var catalog = path == "builtin" ? HidRuleLoader.LoadEmbedded() : new HidRuleDocument(HidRuleLoader.LoadExternalFile(path));
+        var rule = catalog.Rules.SingleOrDefault(r => r.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidDataException($"Unknown rule ID: {id}");
+        return (rule, catalog);
+    }
+
+    private static void PrintReplay(HidRule rule, HidRuleDocument catalog, IHidReportChannel channel)
+    {
+        var result = HidRuleEngine.Execute(rule, catalog, channel, trace: item =>
+        {
+            if (item.Stage == "query") Console.WriteLine(item.Frame!.Length == 0
+                ? $"phase {item.Phase} query: passive" : $"phase {item.Phase} query: {Convert.ToHexString(item.Frame)}");
+            if (item.Stage == "receive")
+                Console.WriteLine($"phase {item.Phase} frame: {Convert.ToHexString(item.Frame!)} => {item.Reason}");
+        });
         Console.WriteLine(result.Sample is { } value
-            ? $"result: {value.Percent}% power={System.Text.Json.JsonNamingPolicy.SnakeCaseLower.ConvertName(value.Power.ToString())} reference={value.IsReference}"
+            ? $"result: {value.Percent}% power={JsonNamingPolicy.SnakeCaseLower.ConvertName(value.Power.ToString())} reference={value.IsReference}"
             : $"result: {result.Disposition}");
+    }
+
+    private static IHidReportChannel ReplayFromDiagnostic(ScanReport report, int endpoint)
+    {
+        if (report.SchemaVersion != 1 || report.Hid?.Endpoints is not { } endpoints ||
+            !endpoints.Any(entry => entry?.Id == endpoint) || report.Hid.Exchanges is not { } exchanges)
+            throw new InvalidDataException("Unsupported diagnostic or unknown HID endpoint.");
+        var transcript = exchanges.Where(item => item?.EndpointId == endpoint).ToArray();
+        if (transcript.LastOrDefault()?.Stage != "outcome")
+            throw new InvalidDataException("The selected endpoint has no complete exchange.");
+        var frames = new Dictionary<(int Phase, string Type), Queue<byte[]>>();
+        foreach (var item in transcript.Where(item => item.Stage == "receive"))
+        {
+            if (item.Truncated || item.Hex is null || item.Length != item.CapturedLength ||
+                item.Length is not (>= 0 and <= HidRuleLoader.MaxReportLength) ||
+                item.Hex.Length != item.Length * 2 || item.Phase is < 1 or > 2 ||
+                item.Direction != "rx" || item.ReportType is not ("input" or "feature"))
+                throw new InvalidDataException("Diagnostic contains a truncated or invalid receive frame.");
+            var frame = Convert.FromHexString(item.Hex);
+            if (item.ReportId != (frame.Length > 0 ? frame[0] : (int?)null))
+                throw new InvalidDataException("Diagnostic frame has a mismatched Report ID.");
+            var key = (item.Phase, item.ReportType);
+            if (!frames.TryGetValue(key, out var queue)) frames.Add(key, queue = new());
+            if (queue.Count >= 16) throw new InvalidDataException("Too many frames in a replay phase.");
+            queue.Enqueue(frame);
+        }
+        return new DiagnosticReplay(frames);
+    }
+
+    private sealed class DiagnosticReplay(Dictionary<(int Phase, string Type), Queue<byte[]>> frames) : IHidReportChannel
+    {
+        private int phase;
+        public void BeginPhase(int value) => phase = value;
+        public byte[]? ReadInput() => Next("input");
+        public byte[]? GetFeature(byte reportId) => Next("feature");
+        public void WriteOutput(byte[] report) { }
+        public void SetFeature(byte[] report) { }
+        private byte[]? Next(string type) => frames.TryGetValue((phase, type), out var queue) && queue.TryDequeue(out var bytes)
+            ? bytes : null;
     }
 
     internal static void Run(Action<bool, string> check)
@@ -83,7 +153,7 @@ internal static class HidRuleChecks
         var keyboard = Rule("mchose-g87-v2-receiver");
         var headset = Rule("mchose-g9-pro-receiver");
         check(catalog.Rules.Length == 4 && wired.BuiltinDriver is null && keyboard.BuiltinDriver is null &&
-            headset.BuiltinDriver is null && receiver.BuiltinDriver == HidRuleLoader.G3Receiver,
+            headset.BuiltinDriver is null && receiver.BuiltinDriver == HidBuiltinDrivers.G3Receiver,
             "ship three declarative HID endpoints and one two-phase G3 receiver");
 
         byte[] g3Probe = [0, 0xAA, 0xED, 0, 0, 0, 0, 0, 0, 0];
@@ -159,6 +229,116 @@ internal static class HidRuleChecks
         }
         """;
 
+    internal static void CheckDiagnosticsAndOverrides(Action<bool, string> check)
+    {
+        var embedded = HidRuleLoader.LoadEmbedded();
+        var headset = embedded.Rules.Single(rule => rule.Id == UsbBattery.HeadsetRuleId);
+        var group = headset.Match.DeviceGroup;
+        string folder = Directory.CreateTempSubdirectory("PeripheralPower-Override-").FullName;
+        try
+        {
+            void Save(string name, HidRule rule) => File.WriteAllText(Path.Combine(folder, name),
+                JsonSerializer.Serialize(rule, HidRuleJsonContext.Strict.HidRule));
+            var good = headset with { Name = "Verified parser override" };
+            Save("10-valid.json", good);
+            Save("20-moved.json", good with { Name = "bad", Match = good.Match with { Pids = [1] } });
+            Save("25-priority.json", good with { Match = good.Match with { Priority = 100 } });
+            Save("30-group.json", good with { Id = "different-id", Match = good.Match with { DeviceGroup = group.ToLowerInvariant() } });
+            File.WriteAllText(Path.Combine(folder, "40-corrupt.json"), "{\"rules\":[");
+            File.WriteAllText(Path.Combine(folder, "50-version.json"), "{\"schemaVersion\":2,\"rules\":[]}");
+            var rejected = new List<string>();
+            var loaded = HidRuleLoader.LoadDirectory(folder, embedded, (path, _) => rejected.Add(Path.GetFileName(path)));
+            var selected = loaded.Rules.Single(rule => rule.Id == headset.Id);
+            check(selected.Name == good.Name && selected.AllowUndescribedOutput && rejected.SequenceEqual(
+                ["20-moved.json", "25-priority.json", "30-group.json", "40-corrupt.json", "50-version.json"]),
+                "compatible override survives malformed file, reassignment, priority changes and reserved grouping");
+            var changedCommand = headset.Query! with { Bytes = new(headset.Query!.Bytes!) { [2] = 2 } };
+            Save("60-different-command.json", good with { Query = changedCommand });
+            var changed = HidRuleLoader.LoadDirectory(folder, embedded, (_, _) => { }).Rules.Single(r => r.Id == headset.Id);
+            var missingOutput = new HidSharp.Reports.DeviceItem();
+            check(!changed.AllowUndescribedOutput && UsbBattery.EffectiveRule(changed, missingOutput, 64, 64, 0) == headset &&
+                UsbBattery.EffectiveRule(selected, missingOutput, 64, 64, 0) == selected,
+                "unsupported override falls back before I/O and cannot inherit the shipped descriptor exception");
+            check(HidRuleLoader.LoadDirectory(Path.Combine(folder, "missing"), embedded, (_, _) => { }) == embedded,
+                "missing rules directory leaves the embedded catalog available");
+
+            string passivePath = Path.Combine(folder, "passive.json");
+            File.WriteAllText(passivePath, """
+                {
+                  "id":"passive", "name":"Passive", "kind":"generic",
+                  "match":{"vid":4660,"pids":[22136],"deviceGroup":"passive","transport":"receiver","priority":1,
+                    "interface":{"inputReportId":42}},
+                  "query":{"mode":"passive_listen"},
+                  "response":{"minLength":2,"maxReads":3,"invalidWhen":[[{"index":1,"equal":255}]]},
+                  "parse":{"level":{"field":{"index":1},"decode":"percent"}}
+                }
+                """);
+            var passive = HidRuleLoader.LoadExternalFile(passivePath).Single();
+            var descriptor = new HidEndpoint(4660, 22136, 65281, 1, 2, 0, 0, new([42], [], []));
+            check(passive.Match.Matches(descriptor) && !passive.Match.Matches(descriptor with { Reports = new([41], [], []) }) &&
+                UsbBattery.SelectUsage(passive.Match, [0xFF010001]) == 0xFF010001 &&
+                UsbBattery.SelectUsage(passive.Match, [0xFF000001]) is null &&
+                UsbBattery.SelectUsage(passive.Match, [0xFF010001, 0xFF010002]) is null,
+                "passive rules require a specific report and a unique permitted collection usage");
+            var trace = new List<HidProtocolEvent>();
+            var result = HidRuleEngine.Execute(passive, new([passive]), new Replay([[41, 12], [42, 255], [42, 55]]), trace: trace.Add);
+            check(result.Sample?.Percent == 55 && trace.Where(e => e.Stage == "receive").Select(e => e.Reason)
+                .SequenceEqual(["report_id", "invalid_when", "accepted"]), "discard other report IDs and invalid frames within the read limit");
+            check(HidRuleEngine.Execute(passive, new([passive]), new Replay([[42, 101], [42, 55]])).Sample?.Percent == 55,
+                "invalid decoded percent does not discard a later good frame");
+
+            string original = File.ReadAllText(passivePath);
+            File.WriteAllText(passivePath, original.Replace("\"mode\":\"passive_listen\"",
+                "\"mode\":\"output_then_input\",\"length\":2,\"bytes\":{\"0\":42}"));
+            bool unsafeWrite = false;
+            try { HidRuleLoader.LoadExternalFile(passivePath); }
+            catch (InvalidDataException) { unsafeWrite = true; }
+            check(unsafeWrite, "writes require exact Usage Page and Usage");
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+
+        var capture = new HidScanCapture();
+        int id = capture.AllocateEndpoint(10525, 14429);
+        int other = capture.AllocateEndpoint(4660, 22136);
+        capture.ObserveEndpoint(new(id, 10525, 14429, 64, 64, 0, [new([new(65424, 1)], new([85], [], []))], headset.Id, "matched"));
+        capture.SetEndpointStatus(other, "no_rule");
+        byte[] frame = new byte[64];
+        new byte[] { 0x55, 0x65, 15, 3 }.CopyTo(frame, 0);
+        frame[^1] = 0xAB;
+        var accepted = HidRuleEngine.Execute(headset, embedded, new Replay([[0x55], frame]),
+            trace: item => capture.Record(id, headset, 14429, item));
+        var (snapshot, details) = capture.Finish();
+        var scan = new ScanReport([], details, false, 1, snapshot);
+        var json = JsonSerializer.Serialize(scan, ScanJsonContext.Default.ScanReport);
+        using var parsed = JsonDocument.Parse(json);
+        var loadedReport = parsed.RootElement.Deserialize(ScanJsonContext.Default.ScanReport)!;
+        var received = snapshot.Exchanges.Last(item => item.Stage == "receive");
+        check(accepted.Sample == new HidSample(15, HidPower.Charging, true) &&
+            parsed.RootElement.TryGetProperty("readings", out _) && parsed.RootElement.TryGetProperty("partial", out _) &&
+            received is { Length: 64, CapturedLength: 64, Truncated: false } && received.Hex!.EndsWith("AB") &&
+            snapshot.Exchanges.All(item => item.EndpointId != other) &&
+            HidRuleEngine.Execute(headset, embedded, ReplayFromDiagnostic(loadedReport, id)).Sample == accepted.Sample,
+            "diagnostic preserves legacy fields, captures complete frames and replays through the same parser");
+        var damaged = snapshot with { Exchanges = snapshot.Exchanges.Select(item =>
+            item == received ? item with { CapturedLength = 20, Truncated = true } : item).ToArray() };
+        bool truncated = false;
+        try { ReplayFromDiagnostic(scan with { Hid = damaged }, id); }
+        catch (InvalidDataException) { truncated = true; }
+        check(truncated, "diagnostic replay rejects truncated frames");
+
+        var alerts = new Dictionary<string, int>();
+        BatteryReading[] low =
+        [
+            new("usb-first", "first", DeviceKind.Mouse, 9, false, "USB", ReportedPower: HidPower.Discharging),
+            new("usb-second", "second", DeviceKind.Keyboard, 4, false, "USB", ReportedPower: HidPower.Discharging),
+            new("usb-reference", "reference", DeviceKind.Headset, 5, false, "2.4 GHz", true,
+                ReportedPower: HidPower.ExternalReference)
+        ];
+        check(PowerContext.CollectLowBatteryAlerts(low, alerts, true).SequenceEqual(["first 剩余 9%", "second 剩余 4%"]) &&
+            PowerContext.CollectLowBatteryAlerts(low, alerts, true).Count == 0,
+            "multiple low devices remain eligible in the same batch while reference readings stay silent");
+    }
+
     private static void CheckLoader(Action<bool, string> check)
     {
         string directory = Directory.CreateTempSubdirectory("PeripheralPower-HidRules-").FullName;
@@ -187,7 +367,8 @@ internal static class HidRuleChecks
                 (Example.Replace("\"kind\":\"mouse\"", "\"kind\":\"mouse\",\"builtinDriver\":\"mchose_g3_v2_receiver\""), "external builtinDriver"),
                 (Example.Replace("\"mode\":\"output_then_input\"", "\"mode\":0"), "numeric enum"),
                 (Example.Replace("\"vid\":4660", "\"vid\":4660,\"vid\":2"), "duplicate property"),
-                (Example.Replace("\"index\":1", "\"mask\":1"), "missing index")
+                (Example.Replace("\"index\":1", "\"mask\":1"), "missing index"),
+                (Example.Replace("\"0\":0", "\"0\":0,\"00\":1"), "ambiguous numeric byte index")
             })
             {
                 File.WriteAllText(path, json);

@@ -17,25 +17,39 @@ internal sealed record HidRule(string Id, string Name, DeviceKind Kind, HidMatch
     internal bool AllowUndescribedOutput { get; init; }
 
     [JsonIgnore]
+    internal HidRule? ShippedFallback { get; init; }
+
+    [JsonIgnore]
     public HidTransaction Transaction => new(Query!, Response!, Parse);
 }
 
-internal sealed record HidMatch(int Vid, int[] Pids, int UsagePage, int Usage, string DeviceGroup,
-    HidTransport Transport, int Priority, int MinInput = 0, int MinOutput = 0, int MinFeature = 0)
+internal sealed record HidMatch(int Vid, int[] Pids, string DeviceGroup,
+    HidTransport Transport, int Priority, int MinInput = 0, int MinOutput = 0, int MinFeature = 0,
+    int? UsagePage = null, int? Usage = null, HidInterface? Interface = null)
 {
     public bool Matches(HidEndpoint target) => Vid == target.Vid && Pids.Contains(target.Pid) &&
-        UsagePage == target.UsagePage && Usage == target.Usage &&
-        target.Input >= MinInput && target.Output >= MinOutput && target.Feature >= MinFeature;
+        (UsagePage is null || UsagePage == target.UsagePage && Usage == target.Usage) &&
+        target.Input >= MinInput && target.Output >= MinOutput && target.Feature >= MinFeature &&
+        (Interface is null || Interface.Matches(target.Reports));
 }
 
-internal readonly record struct HidEndpoint(int Vid, int Pid, int UsagePage, int Usage, int Input, int Output, int Feature);
+internal sealed record HidInterface(int? InputReportId = null, int? OutputReportId = null, int? FeatureReportId = null)
+{
+    internal bool Matches(HidCollectionReports? reports) =>
+        (InputReportId is null || reports?.Input.Contains(InputReportId.Value) == true) &&
+        (OutputReportId is null || reports?.Output.Contains(OutputReportId.Value) == true) &&
+        (FeatureReportId is null || reports?.Feature.Contains(FeatureReportId.Value) == true);
+}
+
+internal readonly record struct HidEndpoint(int Vid, int Pid, int UsagePage, int Usage, int Input, int Output, int Feature,
+    HidCollectionReports? Reports = null);
 internal sealed record HidTransaction(HidQuery Query, HidResponse Response, HidParse? Parse = null);
 internal sealed record HidQuery(HidQueryMode Mode, int Length = 0, Dictionary<int, int>? Bytes = null,
     int? ReportId = null, HidChecksum? Checksum = null);
 internal sealed record HidChecksum(HidChecksumKind Kind, int Start = 0, int End = 0, int Index = 0,
     int Constant = 0, int Polynomial = 7, int Initial = 0, int XorOut = 0);
 internal sealed record HidResponse(int MinLength, int MaxReads = 1, int? ExactLength = null,
-    HidTest[][]? Expect = null, HidTest[][]? AsleepWhen = null, HidChecksum? Checksum = null);
+    HidTest[][]? Expect = null, HidTest[][]? AsleepWhen = null, HidChecksum? Checksum = null, HidTest[][]? InvalidWhen = null);
 internal sealed record HidField(int Index, int Width = 1, bool BigEndian = false, int? Mask = null, int Shift = 0)
 {
     public int Get(ReadOnlySpan<byte> frame)
@@ -65,7 +79,11 @@ internal sealed record HidVoltagePoint(int Millivolts, int Percent);
 internal sealed record HidState(HidPower Power, HidTest[][] When, bool IsReference = false);
 internal readonly record struct HidSample(int Percent, HidPower Power, bool IsReference = false);
 internal readonly record struct HidRuleResult(HidDisposition Disposition, HidSample? Sample = null);
-internal sealed record HidRuleDocument(HidRule[] Rules, Dictionary<string, HidTransaction[]>? DriverSteps = null);
+internal sealed record HidRuleDocument(HidRule[] Rules, Dictionary<string, HidTransaction[]>? DriverSteps = null, int SchemaVersion = 1)
+{
+    [JsonIgnore]
+    internal HashSet<string>? BuiltinIds { get; init; }
+}
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow)]

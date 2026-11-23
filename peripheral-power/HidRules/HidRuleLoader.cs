@@ -1,12 +1,13 @@
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Security;
+using System.Globalization;
 using System.Text.Json;
 
 namespace PeripheralPower;
 
 internal static class HidRuleLoader
 {
-    internal const string G3Receiver = "mchose_g3_v2_receiver";
     internal const int MaxReportLength = 4096;
     private const int MaxFileBytes = 64 * 1024;
     private const int MaxFiles = 64;
@@ -22,7 +23,8 @@ internal static class HidRuleLoader
         return document with
         {
             Rules = document.Rules.Select(rule => rule.Id == UsbBattery.HeadsetRuleId
-                ? rule with { AllowUndescribedOutput = true } : rule).ToArray()
+                ? rule with { AllowUndescribedOutput = true } : rule).ToArray(),
+            BuiltinIds = document.Rules.Select(rule => rule.Id).ToHashSet(StringComparer.OrdinalIgnoreCase)
         };
     }
 
@@ -37,6 +39,7 @@ internal static class HidRuleLoader
         using var json = JsonDocument.Parse(data);
         var root = json.RootElement;
         Require(root.ValueKind == JsonValueKind.Object, "Expected a rule object or a document with a rules array.");
+        ValidateNumericKeys(root);
         var document = root.TryGetProperty("rules", out _)
             ? root.Deserialize(HidRuleJsonContext.Strict.HidRuleDocument)
             : new HidRuleDocument([root.Deserialize(HidRuleJsonContext.Strict.HidRule)!]);
@@ -48,6 +51,8 @@ internal static class HidRuleLoader
     internal static HidRuleDocument LoadDirectory(string directory, HidRuleDocument defaults, Action<string, Exception> error)
     {
         var active = defaults.Rules.ToDictionary(r => r.Id, StringComparer.OrdinalIgnoreCase);
+        var shipped = new Dictionary<string, HidRule>(active, StringComparer.OrdinalIgnoreCase);
+        var shippedGroups = shipped.Values.Select(r => r.Match.DeviceGroup).ToHashSet(StringComparer.OrdinalIgnoreCase);
         try
         {
             if (!Directory.Exists(directory)) return defaults;
@@ -60,7 +65,13 @@ internal static class HidRuleLoader
                     var rules = LoadExternalFile(path);
                     Require(active.Count + rules.Count(r => !active.ContainsKey(r.Id)) <= MaxRules,
                         "The active HID rule catalog would exceed 64 entries.");
-                    foreach (var rule in rules) active[rule.Id] = rule;
+                    var validated = rules.Select(rule =>
+                    {
+                        if (shipped.TryGetValue(rule.Id, out var original)) return ValidateOverride(rule, original);
+                        Require(!shippedGroups.Contains(rule.Match.DeviceGroup), $"{rule.Id}: deviceGroup is reserved by an embedded rule.");
+                        return rule;
+                    }).ToArray();
+                    foreach (var rule in validated) active[rule.Id] = rule;
                 }
                 catch (Exception ex) when (IsRuleError(ex)) { error(path, ex); }
             }
@@ -70,24 +81,38 @@ internal static class HidRuleLoader
     }
 
     internal static bool IsRuleError(Exception ex) =>
-        ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException;
+        ex is IOException or UnauthorizedAccessException or SecurityException or JsonException or InvalidDataException;
 
     internal static bool ExternalIdentityAllowed(int vid, IEnumerable<int> pids, int page) =>
         // Known HID bootloaders can expose private collections. Reject their USB identities
         // even when a rule specifies a seemingly valid vendor Usage Page.
-        page is >= 0xFF01 and <= 0xFFFF && !pids.Any(pid => (vid, pid) is
-            (0x16C0, 0x0478) or (0x16C0, 0x05DF) or (0x03EB, 0x2067)); // HalfKay, BootloadHID, QMK HID
+        page is >= 0xFF01 and <= 0xFFFF && !pids.Any(pid => IsBlockedDevice(vid, pid));
+
+    internal static bool IsBlockedDevice(int vid, int pid) =>
+        (vid, pid) is (0x16C0, 0x0478) or (0x16C0, 0x05DF) or (0x03EB, 0x2067); // HalfKay, BootloadHID, QMK HID
+
+    private static HidRule ValidateOverride(HidRule rule, HidRule original)
+    {
+        var match = rule.Match;
+        var shipped = original.Match;
+        Require(rule.Kind == original.Kind && match.Pids.Order().SequenceEqual(shipped.Pids.Order()) &&
+            (match with { Pids = shipped.Pids }) == shipped, $"{rule.Id}: overriding an embedded rule must preserve its match and kind.");
+        // The shipped G9 command remains eligible for the native compatibility exception,
+        // even when an override changes the parser. No different command inherits it.
+        bool stockOutput = original.AllowUndescribedOutput && rule.Query?.Mode == original.Query?.Mode &&
+            HidRuleEngine.BuildQuery(rule.Query!).SequenceEqual(HidRuleEngine.BuildQuery(original.Query!));
+        return rule with { Id = original.Id, AllowUndescribedOutput = stockOutput, ShippedFallback = original };
+    }
 
     private static void ValidateDocument(HidRuleDocument document, bool embedded)
     {
+        Require(document.SchemaVersion == 1, "Unsupported HID rule schema version.");
         var steps = document.DriverSteps;
         Require(steps is null || embedded, "Only built-in rules can contain driverSteps.");
         foreach (var (name, phases) in steps ?? [])
         {
-            Require(name == G3Receiver && phases is { Length: 2 }, "Unknown built-in driver or invalid phase count.");
-            Require(phases![0]?.Parse is null && phases[0]?.Response?.AsleepWhen is not null && phases[1]?.Parse is not null,
-                "The receiver driver needs an availability phase and a battery phase.");
-            foreach (var phase in phases) ValidateTransaction(phase, requireParse: false);
+            Require(HidBuiltinDrivers.ValidPhases(name, phases), "Unknown built-in driver or invalid phases.");
+            foreach (var phase in phases!) ValidateTransaction(phase, requireParse: false);
         }
         Require(document.Rules is { Length: <= MaxRules }, "Expected at most 64 rules.");
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -106,21 +131,36 @@ internal static class HidRuleLoader
         Require(match is not null && match.Vid is >= 1 and <= 65535 &&
             match.Pids is { Length: >= 1 and <= 32 } && match.Pids.All(pid => pid is >= 1 and <= 65535) &&
             match.Pids.Distinct().Count() == match.Pids.Length, "Expected an exact VID and distinct nonzero PIDs.");
-        Require(match!.Usage is >= 1 and <= 65535 && match.UsagePage is >= 0xFF00 and <= 0xFFFF &&
-            (embedded || ExternalIdentityAllowed(match.Vid, match.Pids, match.UsagePage)),
+        bool scoped = match!.Usage is >= 1 and <= 65535 && match.UsagePage is >= 0xFF00 and <= 0xFFFF &&
+            (embedded || ExternalIdentityAllowed(match.Vid, match.Pids, match.UsagePage.Value));
+        bool passive = match.Usage is null && match.UsagePage is null &&
+            rule.Query?.Mode == HidQueryMode.PassiveListen && match.Interface?.InputReportId is not null &&
+            !match.Pids.Any(pid => IsBlockedDevice(match.Vid, pid));
+        Require(scoped || passive,
             "Expected an exact permitted vendor Usage Page and Usage.");
+        if (match.Interface is { } selector)
+            Require((selector.InputReportId is not null || selector.OutputReportId is not null || selector.FeatureReportId is not null) &&
+                ValidReportId(selector.InputReportId) && ValidReportId(selector.OutputReportId) && ValidReportId(selector.FeatureReportId),
+                "Invalid interface Report ID selector.");
         Require(ValidId(match.DeviceGroup) && match.Priority is >= -1000 and <= 1000, "Invalid deviceGroup or priority.");
         Require(ValidReportLength(match.MinInput) && ValidReportLength(match.MinOutput) &&
             ValidReportLength(match.MinFeature), "Invalid minimum report length.");
 
         if (rule.BuiltinDriver is { } driver)
         {
-            Require(embedded && driver == G3Receiver && steps != null && steps.ContainsKey(driver) &&
+            Require(embedded && HidBuiltinDrivers.IsRegistered(driver) && steps != null && steps.ContainsKey(driver) &&
                 rule.Query is null && rule.Response is null && rule.Parse is null,
                 "builtinDriver is reserved for an embedded rule and is exclusive with query, response and parse.");
             return;
         }
         ValidateTransaction(rule.Transaction, requireParse: true);
+        if (match.Interface is { } descriptor && rule.Query is { } query)
+        {
+            if (query.Mode == HidQueryMode.OutputThenInput && descriptor.OutputReportId is int output)
+                Require(query.Bytes![0] == output, "Query Report ID does not match interface.outputReportId.");
+            if (query.Mode is HidQueryMode.FeatureSetGet or HidQueryMode.FeatureGetOnly && descriptor.FeatureReportId is int feature)
+                Require((query.ReportId ?? query.Bytes![0]) == feature, "Query Report ID does not match interface.featureReportId.");
+        }
     }
 
     private static void ValidateTransaction(HidTransaction? transaction, bool requireParse)
@@ -157,6 +197,7 @@ internal static class HidRuleLoader
         int length = response.ExactLength ?? response.MinLength;
         ValidateTests(response.Expect, length);
         ValidateTests(response.AsleepWhen, length);
+        ValidateTests(response.InvalidWhen, length);
         ValidateChecksum(response.Checksum, length);
 
         if (transaction.Parse is not { } parse)
@@ -222,8 +263,26 @@ internal static class HidRuleLoader
 
     private static bool ValidId(string? value) => value is { Length: >= 1 and <= 64 } &&
         value.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.');
+
+    private static void ValidateNumericKeys(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Array)
+            foreach (var child in element.EnumerateArray()) ValidateNumericKeys(child);
+        if (element.ValueKind != JsonValueKind.Object) return;
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Name is ("bytes" or "values") && property.Value.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var entry in property.Value.EnumerateObject())
+                    Require(int.TryParse(entry.Name, NumberStyles.None, CultureInfo.InvariantCulture, out int key) &&
+                        entry.Name == key.ToString(CultureInfo.InvariantCulture), "Byte and lookup keys must be canonical decimal integers.");
+            }
+            else ValidateNumericKeys(property.Value);
+        }
+    }
     private static bool ValidReportLength(int length) => length is >= 0 and <= MaxReportLength;
     private static bool IsByte(int value) => value is >= 0 and <= 255;
+    private static bool ValidReportId(int? value) => value is null or >= 0 and <= 255;
 
     private static void Require([DoesNotReturnIf(false)] bool condition, string reason)
     {

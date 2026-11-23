@@ -12,9 +12,16 @@ internal static class Checks
     [STAThread]
     private static void Main(string[] args)
     {
-        if (args is ["--hid-rule", var rule, "--id", var id, "--frames", var frames])
+        if (args is ["--hid-rule", ..] && args.Length > 1)
         {
-            try { HidRuleChecks.ValidateFile(rule, id, frames); }
+            try
+            {
+                if (args is ["--hid-rule", var rule, "--id", var id, "--frames", var frames])
+                    HidRuleChecks.ValidateFile(rule, id, frames);
+                else if (args is ["--hid-rule", var source, "--id", var ruleId, "--diagnostic", var file, "--endpoint", var endpoint])
+                    HidRuleChecks.ValidateDiagnostic(source, ruleId, file, endpoint);
+                else throw new InvalidDataException("Expected --hid-rule <json|builtin> --id <id> followed by --frames <hex-file> or --diagnostic <scan.json> --endpoint <id>.");
+            }
             catch (Exception ex) when (HidRuleLoader.IsRuleError(ex) || ex is FormatException)
             {
                 Console.Error.WriteLine(ex.Message);
@@ -30,6 +37,7 @@ internal static class Checks
         }
         HidRuleChecks.Run(Require);
         HidRuleChecks.CheckScanIntegration(Require);
+        HidRuleChecks.CheckDiagnosticsAndOverrides(Require);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         RefreshChecks.Run(Require);

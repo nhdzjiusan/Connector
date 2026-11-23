@@ -1,6 +1,5 @@
 using HidSharp;
 using Microsoft.Win32;
-using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
 using Windows.Devices.Enumeration;
@@ -93,17 +92,19 @@ internal static class Program
 
     private static void ScanToFile(string report)
     {
-        var details = new ConcurrentQueue<string>();
+        var capture = new HidScanCapture();
         try
         {
             report = Path.GetFullPath(report);
             if (!Directory.Exists(Path.GetDirectoryName(report))) throw new DirectoryNotFoundException("报告目录不存在");
-            var usb = UsbBattery.ReadAsync(details.Enqueue);
+            var usb = UsbBattery.ReadAsync(capture);
             var bluetooth = BluetoothBattery.ReadAsync();
             Task.WhenAll(usb, bluetooth).GetAwaiter().GetResult();
-            var readings = usb.Result.Fresh.Concat(bluetooth.Result.Fresh).ToArray();
-            File.WriteAllText(report, JsonSerializer.Serialize(new { readings, details, partial = usb.Result.Partial || bluetooth.Result.Partial },
-                new JsonSerializerOptions { WriteIndented = true }));
+            var readings = usb.Result.Fresh.Concat(bluetooth.Result.Fresh.Select((reading, i) =>
+                reading with { Id = $"ble-{i + 1}" })).ToArray();
+            var (hid, details) = capture.Finish();
+            var result = new ScanReport(readings, details, usb.Result.Partial || bluetooth.Result.Partial, 1, hid);
+            File.WriteAllText(report, JsonSerializer.Serialize(result, ScanJsonContext.Default.ScanReport));
         }
         catch (Exception ex)
         {

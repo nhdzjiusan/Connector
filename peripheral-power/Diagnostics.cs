@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace PeripheralPower;
 
@@ -39,3 +40,14 @@ internal sealed record PollResult(BatteryReading[] Fresh, HashSet<string>? Prese
         return new([],null,true);
     }
 }
+
+internal sealed record ScanReport(
+    [property: JsonPropertyName("readings")] BatteryReading[] Readings,
+    [property: JsonPropertyName("details")] string[] Details,
+    [property: JsonPropertyName("partial")] bool Partial,
+    [property: JsonPropertyName("schemaVersion")] int SchemaVersion,
+    [property: JsonPropertyName("hid")] HidScanDiagnostic Hid);
+
+[JsonSourceGenerationOptions(WriteIndented = true)]
+[JsonSerializable(typeof(ScanReport))]
+internal sealed partial class ScanJsonContext : JsonSerializerContext;
