@@ -14,6 +14,19 @@ internal static class Checks
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
+        var area = new Rectangle(-200, 0, 200, 40);
+        var geometry = new object[,]
+        {
+            { 0, 50000, "root", false, new double[] {-200,0,200,40}, true },
+            { 0, 0, "TrayNotifyWnd", new object(), new double[] {-50,0,50,40}, new object() },
+            { 0, 50000, "Button", false, new double[] {-199.5,0,20,40}, true },
+            { 0, 50000, "Button", true, new double[] {-100,0,20,40}, true },
+            { 0, 50000, "Button", false, new double[] {10,0,20,40}, true },
+            { 0, 0, "MSTaskSwWClass", false, new double[] {-200,0,150,40}, false }
+        };
+        Require(TaskbarGeometry.OccupiedBounds(geometry,area).SequenceEqual(
+            new[] { new Rectangle(-50,0,50,40), new Rectangle(-200,0,21,40) }),
+            "reserve visible buttons and notification area even without IsOffscreen");
         var t = new DateTime(2026,11,23,9,30,0);
         BatteryReading[] old = [new("usb-Mouse","MCHOSE G3 V2",DeviceKind.Mouse,74,false,"2.4 GHz",SampledAt:t)];
         BatteryReading[] Merge(PollResult p, bool changed) => PowerContext.Merge(old,"usb-",p,changed,t.AddMinutes(5)).ToArray();

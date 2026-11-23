@@ -62,7 +62,7 @@ Windows 10 2004 及更新版本的 x64 托盘应用。独立发布的可执行�
 
 ## 构建与发布
 
-本轮本地候选 exe 的 Authenticode 检查结果为 `NotSigned`，SHA-256 为 `3cd1487be2dc6d4832b95fa5de3b0c72f3a7556014a2ca9d1f31d60e833223fc`。本轮未取得可核实的 VirusTotal 检测结果。[按该候选文件的哈希查询](https://www.virustotal.com/gui/file/3cd1487be2dc6d4832b95fa5de3b0c72f3a7556014a2ca9d1f31d60e833223fc)。Actions 构建可能生成不同哈希，请以实际下载的校验附件为准。
+1.2.0 使用 Windows 自带的 UI Automation 定位任务栏按钮，单文件只携带 WinForms 所需的桌面组件。登录后静默启动，首次打开面板时才创建窗体。内存占用会随设备数量、显示缩放和面板使用情况变化。
 
 在 Windows 安装 .NET 10 SDK，在项目目录运行以下命令。
 

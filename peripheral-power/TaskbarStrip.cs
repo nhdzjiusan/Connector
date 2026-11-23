@@ -2,7 +2,6 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
-using System.Windows.Automation;
 using Microsoft.Win32;
 
 namespace PeripheralPower;
@@ -32,7 +31,6 @@ internal sealed class TaskbarStrip : Form
         TopMost = true;
         AutoScaleMode = AutoScaleMode.None;
         tick.Tick += (_, _) => LayoutStrip();
-        tick.Start();
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -45,6 +43,7 @@ internal sealed class TaskbarStrip : Form
     {
         if (devices.SequenceEqual(readings)) return;
         devices = readings;
+        tick.Enabled = readings.Length > 0;
         dirty = true;
         LayoutStrip();
     }
@@ -104,25 +103,7 @@ internal sealed class TaskbarStrip : Form
         measuring = true;
         try
         {
-            var result = await Task.Run(() =>
-            {
-                var root = AutomationElement.FromHandle(hwnd);
-                var matches = root.FindAll(TreeScope.Descendants, new OrCondition(
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
-                    new PropertyCondition(AutomationElement.ClassNameProperty, "TrayNotifyWnd"),
-                    new PropertyCondition(AutomationElement.ClassNameProperty, "MSTaskSwWClass")));
-                var spans = new List<Rectangle>();
-                foreach (AutomationElement e in matches)
-                {
-                    var b = e.Current.BoundingRectangle;
-                    if (!b.IsEmpty && !e.Current.IsOffscreen && b.Width > 0 && b.Height > 0)
-                    {
-                        var rect = Rectangle.FromLTRB((int)b.Left,(int)b.Top,(int)Math.Ceiling(b.Right),(int)Math.Ceiling(b.Bottom));
-                        if (rect.IntersectsWith(bar)) spans.Add(rect);
-                    }
-                }
-                return spans.ToArray();
-            });
+            var result = await Task.Run(() => TaskbarGeometry.Read(hwnd, bar));
             if (IsDisposed) return;
             occupied = result;
             measureErrorReported = false;
@@ -131,9 +112,10 @@ internal sealed class TaskbarStrip : Form
             if (ink != foreground) { foreground = ink; dirty = true; }
             measuredBar = bar;
         }
-        catch (Exception e) when (e is ElementNotAvailableException or InvalidOperationException or COMException or UnauthorizedAccessException)
+        catch (Exception e) when (e is InvalidOperationException or COMException or UnauthorizedAccessException or ArgumentException)
         {
             occupied = [];
+            measuredBar = bar; // Back off even if Explorer disappears during the first measurement.
             if (!measureErrorReported) ErrorLog.Write("任务栏定位",e);
             measureErrorReported = true;
         }

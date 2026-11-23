@@ -184,7 +184,9 @@ internal static class Settings
 internal sealed class PowerContext : ApplicationContext
 {
     private readonly Control dispatcher = new();
-    private readonly BatteryPanel panel = new();
+    private BatteryPanel? panel;
+    private bool startupEnabled;
+    private string? startupWarning, lastWarning;
     private readonly System.Windows.Forms.Timer poll = new();
     private readonly System.Windows.Forms.Timer deviceDelay = new() { Interval = 1100 };
     private readonly TaskbarStrip strip = new();
@@ -206,30 +208,14 @@ internal sealed class PowerContext : ApplicationContext
         _ = dispatcher.Handle;
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
 
-        panel.SetInterval(Settings.LoadInterval());
+        int minutes = Settings.LoadInterval();
         bool repaired = false;
-        try { repaired = Settings.RepairStartup(); bool enabled = Settings.StartsAtLogin(); panel.SetStartup(enabled); Settings.SyncStartup(enabled); }
+        try { repaired = Settings.RepairStartup(); startupEnabled = Settings.StartsAtLogin(); Settings.SyncStartup(startupEnabled); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
             ErrorLog.Write("读取自启动设置",ex);
-            panel.Report("无法读取自启动设置");
+            startupWarning = "无法读取自启动设置";
         }
-        panel.IntervalChanged += SetInterval;
-        panel.StartupChanged += enabled => SetStartup(enabled);
-        panel.SetNotifications(Settings.Notifications);
-        panel.NotificationsChanged += enabled =>
-        {
-            try { Settings.SetNotifications(enabled); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            { ErrorLog.Write("低电量通知设置",ex); panel.SetNotifications(!enabled); panel.Report("通知设置保存失败"); }
-        };
-        panel.RefreshRequested += () => _ = RefreshAsync();
-        panel.ExitRequested += () =>
-        {
-            if (Settings.StartsAtLogin() && MessageBox.Show(panel,"本次退出后，下次登录仍将自动启动。现在退出？",
-                "外设电量",MessageBoxButtons.OKCancel,MessageBoxIcon.Question) != DialogResult.OK) return;
-            ExitThread();
-        };
 
         menu.Items.Add("打开电量与设置", null, (_, _) => ShowPanel(Cursor.Position));
         menu.Items.Add("立即刷新", null, (_, _) => _ = RefreshAsync());
@@ -247,7 +233,7 @@ internal sealed class PowerContext : ApplicationContext
         strip.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowPanel(Cursor.Position); };
         strip.AvailabilityChanged += visible => { stripVisible = visible; UpdateFallback(); };
 
-        poll.Interval = checked(panel.IntervalMinutes * 60_000);
+        poll.Interval = checked(minutes * 60_000);
         poll.Tick += (_, _) => _ = RefreshAsync();
         poll.Start();
         deviceDelay.Tick += (_, _) =>
@@ -267,8 +253,36 @@ internal sealed class PowerContext : ApplicationContext
 
     public void ShowPanel(Point? near = null)
     {
+        panel ??= CreatePanel();
+        panel.SetData(readings, updated, running);
+        if (startupWarning != null || lastWarning != null) panel.Report(startupWarning ?? lastWarning!);
+        startupWarning = null;
         panel.Open(near);
         if (updated == null || DateTime.Now - updated.Value > TimeSpan.FromSeconds(30)) _ = RefreshAsync();
+    }
+
+    private BatteryPanel CreatePanel()
+    {
+        var view = new BatteryPanel();
+        view.SetInterval(poll.Interval / 60_000);
+        view.SetStartup(startupEnabled);
+        view.SetNotifications(Settings.Notifications);
+        view.IntervalChanged += SetInterval;
+        view.StartupChanged += enabled => SetStartup(enabled);
+        view.NotificationsChanged += enabled =>
+        {
+            try { Settings.SetNotifications(enabled); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { ErrorLog.Write("低电量通知设置",ex); view.SetNotifications(!enabled); view.Report("通知设置保存失败"); }
+        };
+        view.RefreshRequested += () => _ = RefreshAsync();
+        view.ExitRequested += () =>
+        {
+            if (startupEnabled && MessageBox.Show(view,"本次退出后，下次登录仍将自动启动。现在退出？",
+                "外设电量",MessageBoxButtons.OKCancel,MessageBoxIcon.Question) != DialogResult.OK) return;
+            ExitThread();
+        };
+        return view;
     }
 
     private void ConfigureIcon(NotifyIcon icon)
@@ -325,8 +339,8 @@ internal sealed class PowerContext : ApplicationContext
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             ErrorLog.Write("保存刷新间隔",ex);
-            panel.SetInterval(poll.Interval / 60_000);
-            panel.Report("刷新间隔保存失败");
+            panel?.SetInterval(poll.Interval / 60_000);
+            panel?.Report("刷新间隔保存失败");
         }
     }
 
@@ -335,15 +349,16 @@ internal sealed class PowerContext : ApplicationContext
         try
         {
             Settings.SetStartup(enabled);
+            startupEnabled = enabled;
             Settings.SyncStartup(enabled);
-            panel.Report(enabled ? "已开启登录自启动" : "已关闭登录自启动");
+            panel?.Report(enabled ? "已开启登录自启动" : "已关闭登录自启动");
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            panel.SetStartup(!enabled);
+            panel?.SetStartup(startupEnabled);
             ErrorLog.Write("保存自启",ex);
-            panel.Report("无法保存自启动设置");
+            panel?.Report("无法保存自启动设置");
             return false;
         }
     }
@@ -361,7 +376,7 @@ internal sealed class PowerContext : ApplicationContext
         bool removeUsb = usbChanged, removeBle = bleChanged;
         usbChanged = bleChanged = false;
         string? warning = null;
-        panel.SetData(readings, updated, busy: true);
+        panel?.SetData(readings, updated, busy: true);
         try
         {
             var usb = SafePoll("USB", () => UsbBattery.ReadAsync());
@@ -390,8 +405,9 @@ internal sealed class PowerContext : ApplicationContext
             running = false;
             if (!closing)
             {
-                panel.SetData(readings, updated, busy: false);
-                if (warning != null) panel.Report(warning);
+                lastWarning = warning;
+                panel?.SetData(readings, updated, busy: false);
+                if (warning != null) panel?.Report(warning);
                 if (queued)
                 {
                     queued = false;
@@ -423,32 +439,45 @@ internal sealed class PowerContext : ApplicationContext
     private void UpdateFallback()
     {
         var needed = stripVisible ? [] : readings.Select(r => r.Id).ToHashSet();
+        var activeArt = new HashSet<(DeviceKind,int,bool,bool)>();
         foreach (var id in fallback.Keys.Where(id => !needed.Contains(id)).ToArray())
         { fallback[id].Dispose(); fallback.Remove(id); }
         foreach (var r in readings.Where(r => needed.Contains(r.Id)))
         {
             if (!fallback.TryGetValue(r.Id,out var icon)) { fallback[r.Id] = icon = new(); ConfigureIcon(icon); }
             var key = (r.Kind,r.Percent,r.Charging,r.IsReference);
+            activeArt.Add(key);
             if (!art.TryGetValue(key,out var drawing)) art[key] = drawing = TrayArt.MakeReading(r);
             icon.Icon = drawing;
             var tip = $"{r.Name} {r.Percent}% {r.PowerStatus}".TrimEnd();
             icon.Text = tip[..Math.Min(63,tip.Length)];
             icon.Visible = true;
         }
+        foreach (var key in art.Keys.Where(k => !activeArt.Contains(k)).ToArray())
+        {
+            art[key].Dispose();
+            art.Remove(key);
+        }
         launcher.Visible = restartOffered || (!stripVisible && fallback.Count == 0);
     }
 
     private void NotifyLow()
     {
+        foreach (var id in alerted.Keys.Where(id => !readings.Any(r => r.Id == id)).ToArray()) alerted.Remove(id);
+        var low = new List<string>();
         foreach (var r in readings.Where(r => !r.Stale))
         {
-            if (r.Percent > 20 || r.Charging || r.FullOnPower) { alerted.Remove(r.Id); continue; }
+            if (r.Charging || r.FullOnPower) { alerted.Remove(r.Id); continue; }
+            if (r.IsReference) continue;
+            if (r.Percent > 20) { alerted.Remove(r.Id); continue; }
             int threshold = r.Percent <= 5 ? 5 : r.Percent <= 10 ? 10 : 20;
             if (!Settings.Notifications || alerted.TryGetValue(r.Id,out int sent) && sent <= threshold) continue;
             alerted[r.Id] = threshold;
-            launcher.Visible = true;
-            launcher.ShowBalloonTip(5000,"外设电量",$"{r.Name} 剩余 {r.Percent}%",ToolTipIcon.Warning);
+            low.Add($"{r.Name} 剩余 {r.Percent}%");
         }
+        if (low.Count == 0 || restartOffered) return;
+        launcher.Visible = true;
+        launcher.ShowBalloonTip(5000, "外设电量", string.Join("；", low), ToolTipIcon.Warning);
     }
 
     protected override void ExitThreadCore()
@@ -468,7 +497,7 @@ internal sealed class PowerContext : ApplicationContext
         launcher.Dispose();
         launcherIcon.Dispose();
         menu.Dispose();
-        panel.Dispose();
+        panel?.Dispose();
         dispatcher.Dispose();
         base.ExitThreadCore();
     }

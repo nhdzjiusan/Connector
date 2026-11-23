@@ -34,6 +34,10 @@ jobs:
           if ($LASTEXITCODE -or $actual.Trim() -ne $version) { throw "Version smoke test failed: $actual" }
           $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content "dist/$name.sha256" "$hash  $name" -Encoding ascii
+          $section = "(?ms)^## " + [regex]::Escape($version) + "[^\r\n]*\r?\n(?<body>.*?)(?=^## |\z)"
+          $notes = [regex]::Match((Get-Content CHANGELOG.md -Raw -Encoding utf8), $section)
+          if (!$notes.Success) { throw "Missing changelog section for $version" }
+          Set-Content release-notes.md $notes.Groups['body'].Value.Trim() -Encoding utf8
       - name: Create or update tagged release
         shell: pwsh
         env:
@@ -42,7 +46,7 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           gh release view $tag --json tagName
           if ($LASTEXITCODE) {
-            gh release create $tag --verify-tag --draft --title $tag --generate-notes
+            gh release create $tag --verify-tag --draft --title "外设电量 $($tag.Substring('peripheral-power-v'.Length))" --notes-file release-notes.md
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
           $assets = (Get-ChildItem dist -File).FullName

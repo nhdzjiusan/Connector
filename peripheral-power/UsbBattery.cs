@@ -58,6 +58,7 @@ internal static class UsbBattery
 
     public static async Task<PollResult> ReadAsync(Action<string>? diagnostic = null)
     {
+        var elapsed = Stopwatch.StartNew();
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         Task<BatteryReading?>[] tasks = [];
         HashSet<string>? present = null;
@@ -81,9 +82,11 @@ internal static class UsbBattery
                 if (budget.IsCancellationRequested) return null;
                 var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant())));
                 using var gate = new Mutex(false, @"Local\PeripheralPower.Hid." + key);
-                try { if (!gate.WaitOne(0)) return null; }
+                var remaining = TimeSpan.FromSeconds(3) - elapsed.Elapsed;
+                if (remaining <= TimeSpan.Zero) return null;
+                try { if (!gate.WaitOne(remaining)) return null; }
                 catch (AbandonedMutexException ex) { ErrorLog.Write("回收 HID 设备锁",ex); }
-                try { return Read(m.p, [m.d], diagnostic); }
+                try { return budget.IsCancellationRequested ? null : Read(m.p, [m.d], diagnostic); }
                 finally { gate.ReleaseMutex(); }
             })).ToArray();
             foreach (var task in tasks) ObserveFailure(task);
@@ -92,7 +95,7 @@ internal static class UsbBattery
         catch (OperationCanceledException) { expired = true; }
         catch (Exception ex) { ErrorLog.Write("USB 设备扫描",ex); expired = true; }
         var values = tasks.Where(t => t.IsCompletedSuccessfully).Select(t => t.Result).OfType<BatteryReading>()
-            .GroupBy(v => v.Id).Select(g => g.First()).ToArray();
+            .GroupBy(v => v.Id).Select(g => g.FirstOrDefault(r => r.Connection == "USB") ?? g.First()).ToArray();
         return new(values,present,expired || present?.Count > values.Length);
     }
 

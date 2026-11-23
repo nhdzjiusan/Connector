@@ -96,7 +96,12 @@ internal sealed class BatteryPanel : Form
         VisibleChanged += (_, _) =>
         {
             lightTimer.Enabled = Visible && MotionAllowed;
-            if (!Visible) light = null;
+            if (!Visible)
+            {
+                light = null;
+                material?.Dispose();
+                material = null;
+            }
         };
         refresh.Click += (_, _) => RefreshRequested?.Invoke();
         exit.Click += (_, _) => ExitRequested?.Invoke();
@@ -260,7 +265,11 @@ internal sealed class BatteryPanel : Form
     }
 
     private int S(int x) => (int)Math.Round(x * DeviceDpi / 96.0);
-    private bool MotionAllowed => !SystemInformation.HighContrast && System.Windows.SystemParameters.ClientAreaAnimation;
+    private static bool MotionAllowed => !SystemInformation.HighContrast &&
+        SystemParametersInfo(0x1042, 0, out var enabled, 0) && enabled != 0; // SPI_GETCLIENTAREAANIMATION
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")]
+    private static extern bool SystemParametersInfo(uint action, uint parameter, out int value, uint flags);
     private Rectangle GlowBounds(Point p) => new(p.X-S(92),p.Y-S(66),S(184),S(132));
 
     private void LayoutPanel()
