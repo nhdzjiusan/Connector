@@ -1,4 +1,6 @@
 using HidSharp;
+using System.Security.Cryptography;
+using System.Text;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -9,9 +11,9 @@ namespace PeripheralPower;
 internal enum DeviceKind { Mouse, Keyboard, Headset }
 
 internal sealed record BatteryReading(string Id, string Name, DeviceKind Kind, int Percent, bool Charging,
-    string Connection, bool IsReference = false, bool FullOnPower = false)
+    string Connection, bool IsReference = false, bool FullOnPower = false, DateTime? SampledAt = null, bool Stale = false)
 {
-    public string PowerStatus => FullOnPower ? "已充满 · 电源已连接" :
+    public string PowerStatus => Stale ? $"参考电量 · 上次更新 {SampledAt:HH:mm}" : FullOnPower ? "已充满 · 电源已连接" :
         Charging && IsReference ? "充电中 · 参考电量" : Charging ? "充电中" :
         IsReference ? "已接电源 · 参考电量" : "";
 }
@@ -28,13 +30,51 @@ internal static class UsbBattery
         new(0x291D, 0x385D, 0xFF900001, "MCHOSE G9 Pro", DeviceKind.Headset)
     ];
 
-    public static async Task<BatteryReading[]> ReadAsync(Action<string>? diagnostic = null)
+    private static readonly SemaphoreSlim Enumeration = new(1);
+
+    public static async Task<PollResult> ReadAsync(Action<string>? diagnostic = null)
     {
-        var devices = DeviceList.Local.GetHidDevices().ToArray();
-        var tasks = Protocols.Select(protocol => Task.Run(() => Read(protocol, devices, diagnostic)));
-        return (await Task.WhenAll(tasks)).OfType<BatteryReading>()
-            .GroupBy(reading => reading.Id).Select(group => group.First()).ToArray();
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        Task<BatteryReading?>[] tasks = [];
+        HashSet<string>? present = null;
+        bool expired = false;
+        try
+        {
+            if (!Enumeration.Wait(0)) return new([], null, true);
+            var inventory = Task.Run(() =>
+            {
+                try { return DeviceList.Local.GetHidDevices().ToArray(); }
+                finally { Enumeration.Release(); }
+            });
+            ObserveFailure(inventory);
+            var devices = await inventory.WaitAsync(budget.Token).ConfigureAwait(false);
+            var matches = (from p in Protocols from d in devices
+                where d.VendorID == p.Vendor && d.ProductID == p.Product select (p,d)).ToArray();
+            present = matches.Select(m => "usb-" + m.p.Kind).ToHashSet();
+            tasks = matches.Select(m => Task.Run(() =>
+            {
+                string path = m.d.DevicePath;
+                if (budget.IsCancellationRequested) return null;
+                var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant())));
+                using var gate = new Mutex(false, @"Local\PeripheralPower.Hid." + key);
+                try { if (!gate.WaitOne(0)) return null; }
+                catch (AbandonedMutexException ex) { ErrorLog.Write("回收 HID 设备锁",ex); }
+                try { return Read(m.p, [m.d], diagnostic); }
+                finally { gate.ReleaseMutex(); }
+            })).ToArray();
+            foreach (var task in tasks) ObserveFailure(task);
+            await Task.WhenAll(tasks).WaitAsync(budget.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { expired = true; }
+        catch (Exception ex) { ErrorLog.Write("USB 设备扫描",ex); expired = true; }
+        var values = tasks.Where(t => t.IsCompletedSuccessfully).Select(t => t.Result).OfType<BatteryReading>()
+            .GroupBy(v => v.Id).Select(g => g.First()).ToArray();
+        return new(values,present,expired || present?.Count > values.Length);
     }
+
+    private static void ObserveFailure(Task task) =>
+        _ = task.ContinueWith(t => ErrorLog.Write("HID 后台读取", t.Exception!.GetBaseException()),
+            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
 
     private static BatteryReading? Read(Protocol protocol, HidDevice[] devices, Action<string>? diagnostic)
     {
@@ -74,6 +114,7 @@ internal static class UsbBattery
             catch (Exception ex) when (ex is IOException or TimeoutException or UnauthorizedAccessException or NotSupportedException)
             {
                 diagnostic?.Invoke($"{protocol.Name}：{ex.Message}");
+                if (ex is not TimeoutException and not NotSupportedException) ErrorLog.Write(protocol.Name,ex);
             }
         }
         return null;
@@ -86,6 +127,8 @@ internal static class UsbBattery
         {
             var status = Exchange(device, stream, [0, 0x55, 0xED],
                 data => data.Length >= 10 && data[1] == 0xAA && data[2] == 0xED, diagnostic);
+            // Receiver reports unavailable while sleeping or using a cable. The wired
+            // endpoint wins if readable; otherwise the snapshot retains the previous sample.
             if (status == null || status[9] == 1) return null;
         }
 
@@ -133,7 +176,7 @@ internal static class UsbBattery
     }
 
     private static BatterySample HeadsetSample(int percent, byte status) =>
-        new(percent, Charging: status == 3, IsReference: status is 0 or 3, FullOnPower: status == 4);
+        new(percent, Charging: status == 3, IsReference: status == 3, FullOnPower: status == 4);
 
     private static bool IsHeadsetBatteryReply(byte[] data)
     {

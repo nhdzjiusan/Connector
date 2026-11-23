@@ -20,20 +20,21 @@ internal static class BluetoothBattery
         return watcher;
     }
 
-    public static async Task<BatteryReading[]> ReadAsync()
+    public static async Task<PollResult> ReadAsync()
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         try
         {
             var devices = await DeviceInformation.FindAllAsync(Selector, [Appearance], DeviceInformationKind.AssociationEndpoint)
                 .AsTask(timeout.Token);
             var tasks = devices.Select(device => ReadDeviceAsync(device, timeout.Token));
-            return (await Task.WhenAll(tasks)).OfType<BatteryReading>().ToArray();
+            var values = (await Task.WhenAll(tasks)).OfType<BatteryReading>().ToArray();
+            return new(values, devices.Select(info => "ble-" + info.Id).ToHashSet(), timeout.IsCancellationRequested);
         }
         catch (Exception ex) when (ex is OperationCanceledException or System.Runtime.InteropServices.COMException
             or UnauthorizedAccessException)
         {
-            return [];
+            return PollResult.Failed("蓝牙枚举",ex);
         }
     }
 
@@ -66,7 +67,7 @@ internal static class BluetoothBattery
                         if (value <= 100) percent = Math.Min(value, percent ?? 100);
                     }
                 }
-                return percent is { } level ? new BatteryReading($"ble-{device.BluetoothAddress:X12}",
+                return percent is { } level ? new BatteryReading("ble-" + info.Id,
                     info.Name, kind.Value, level, false, "蓝牙") : null;
             }
             finally
@@ -77,6 +78,7 @@ internal static class BluetoothBattery
         catch (Exception ex) when (ex is OperationCanceledException or System.Runtime.InteropServices.COMException
             or UnauthorizedAccessException)
         {
+            ErrorLog.Write("蓝牙设备读取",ex);
             return null;
         }
     }
