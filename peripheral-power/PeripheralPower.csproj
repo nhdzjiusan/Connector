@@ -23,6 +23,7 @@
     <InternalsVisibleTo Include="PeripheralPower.Check" />
     <PackageReference Include="HidSharp" Version="2.6.4" />
     <EmbeddedResource Include="HidSharp-LICENSE.txt" />
+    <EmbeddedResource Include="HidRules/default-rules.json" LogicalName="PeripheralPower.HidRules.Defaults" />
     <EmbeddedResource Include="../NOTICE" Link="NOTICE" />
   </ItemGroup>
 </Project>

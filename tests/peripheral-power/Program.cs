@@ -12,6 +12,23 @@ internal static class Checks
     [STAThread]
     private static void Main(string[] args)
     {
+        if (args is ["--hid-rule", var rule, "--id", var id, "--frames", var frames])
+        {
+            try { HidRuleChecks.ValidateFile(rule, id, frames); }
+            catch (Exception ex) when (HidRuleLoader.IsRuleError(ex) || ex is FormatException)
+            {
+                Console.Error.WriteLine(ex.Message);
+                Environment.ExitCode = 1;
+            }
+            return;
+        }
+        if (args.Length > 1 || args is ["--hid-rule"])
+        {
+            Console.Error.WriteLine("Usage: PeripheralPower.Check [screenshot-directory | --hid-rule <json> --id <id> --frames <hex-file>]");
+            Environment.ExitCode = 2;
+            return;
+        }
+        HidRuleChecks.Run(Require);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         var area = new Rectangle(-200, 0, 200, 40);
