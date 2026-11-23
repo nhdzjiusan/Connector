@@ -11,7 +11,8 @@
     <AssemblyName>PeripheralPower</AssemblyName>
     <ApplicationIcon>App.ico</ApplicationIcon>
     <Product>外设电量</Product>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
+    <SatelliteResourceLanguages>zh-Hans;zh-Hant</SatelliteResourceLanguages>
     <FileVersion>$(Version).0</FileVersion>
     <AssemblyVersion>$(Version).0</AssemblyVersion>
     <Company>Connector contributors</Company>

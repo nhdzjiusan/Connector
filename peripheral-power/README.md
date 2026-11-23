@@ -56,13 +56,13 @@ Windows 10 2004 及更新版本的 x64 托盘应用。独立发布的可执行�
 
 ## 验证下载与签名
 
-从同一 Release 下载 `PeripheralPower-1.2.0-win-x64.exe` 和同名的 `.exe.sha256`（按所选版本替换 1.2.0）。在下载目录运行 `certutil -hashfile PeripheralPower-1.2.0-win-x64.exe SHA256`。忽略大小写和空格，对比结果与校验文件第一列的全部 64 个十六进制字符，一致后再运行。版本化命名适用于新流水线发布的附件。
+从同一 Release 下载 `PeripheralPower-1.2.1-win-x64.exe` 和同名的 `.exe.sha256`（按所选版本替换 1.2.1）。在下载目录运行 `certutil -hashfile PeripheralPower-1.2.1-win-x64.exe SHA256`。忽略大小写和空格，对比结果与校验文件第一列的全部 64 个十六进制字符，一致后再运行。版本化命名适用于新流水线发布的附件。
 
 发布流程未配置 Authenticode 签名。可用 `Get-AuthenticodeSignature .\PeripheralPower-1.2.0-win-x64.exe` 检查具体文件。遇到杀软告警时先核对来源和哈希，保留告警名，通过安全软件厂商误报渠道复核。当前没有已验证的 VirusTotal 扫描结论；可在其网站搜索对应附件的 SHA-256。没有报告应记录为“未知”。
 
 ## 构建与发布
 
-1.2.0 使用 Windows 自带的 UI Automation 定位任务栏按钮，单文件只携带 WinForms 所需的桌面组件。登录后静默启动，首次打开面板时才创建窗体。内存占用会随设备数量、显示缩放和面板使用情况变化。
+程序使用 Windows 自带的 UI Automation 定位任务栏按钮，发布包使用 WinForms 桌面组件。1.2.1 随附简体、繁体中文框架资源，其他语言环境使用框架默认英文资源。登录后静默启动，首次打开面板时才创建窗体。内存占用会随设备数量、显示缩放和面板使用情况变化。
 
 在 Windows 安装 .NET 10 SDK，在项目目录运行以下命令。
 

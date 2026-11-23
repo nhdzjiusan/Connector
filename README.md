@@ -15,7 +15,7 @@ Connector 收录两个独立的 Windows 工具。外设电量面向 Windows 10 2
 
 ## 下载与验证
 
-在 [Releases](https://github.com/nhdzjiusan/Connector/releases) 选择以 `peripheral-power-v` 开头的标签。新版附件由版本化 exe 及同名 `.sha256` 组成。例如运行 `certutil -hashfile PeripheralPower-1.2.0-win-x64.exe SHA256`，逐字比对同一 Release 校验文件中的哈希。下载后可直接在普通用户账号运行。
+在 [Releases](https://github.com/nhdzjiusan/Connector/releases) 选择以 `peripheral-power-v` 开头的标签。新版附件由版本化 exe 及同名 `.sha256` 组成。例如运行 `certutil -hashfile PeripheralPower-1.2.1-win-x64.exe SHA256`，逐字比对同一 Release 校验文件中的哈希。下载后可直接在普通用户账号运行。
 
 ## 贡献与许可
 
