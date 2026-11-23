@@ -19,7 +19,11 @@ internal static class HidRuleLoader
         var document = JsonSerializer.Deserialize(stream, HidRuleJsonContext.Strict.HidRuleDocument)
             ?? throw new InvalidDataException("Missing default HID rule document.");
         ValidateDocument(document, embedded: true);
-        return document;
+        return document with
+        {
+            Rules = document.Rules.Select(rule => rule.Id == UsbBattery.HeadsetRuleId
+                ? rule with { AllowUndescribedOutput = true } : rule).ToArray()
+        };
     }
 
     internal static HidRule[] LoadExternalFile(string path)
@@ -69,8 +73,10 @@ internal static class HidRuleLoader
         ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException;
 
     internal static bool ExternalIdentityAllowed(int vid, IEnumerable<int> pids, int page) =>
-        // Exclude generic vendor page FF00 and HalfKay, even if it exposes a vendor-defined collection.
-        page is >= 0xFF01 and <= 0xFFFF && !(vid == 0x16C0 && pids.Contains(0x0478));
+        // Known HID bootloaders can expose private collections. Reject their USB identities
+        // even when a rule specifies a seemingly valid vendor Usage Page.
+        page is >= 0xFF01 and <= 0xFFFF && !pids.Any(pid => (vid, pid) is
+            (0x16C0, 0x0478) or (0x16C0, 0x05DF) or (0x03EB, 0x2067)); // HalfKay, BootloadHID, QMK HID
 
     private static void ValidateDocument(HidRuleDocument document, bool embedded)
     {

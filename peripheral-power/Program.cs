@@ -51,6 +51,7 @@ internal static class Program
         try
         {
             ApplicationConfiguration.Initialize();
+            UsbBattery.InitializeRules();
             using var app = new PowerContext(openPanel);
             current = app;
             if (!args.Contains("--quiet")) app.ShowPanel();
@@ -463,21 +464,27 @@ internal sealed class PowerContext : ApplicationContext
 
     private void NotifyLow()
     {
+        var low = CollectLowBatteryAlerts(readings, alerted, Settings.Notifications);
+        if (low.Count == 0 || restartOffered) return;
+        launcher.Visible = true;
+        launcher.ShowBalloonTip(5000, "外设电量", string.Join("；", low), ToolTipIcon.Warning);
+    }
+
+    internal static List<string> CollectLowBatteryAlerts(BatteryReading[] readings, Dictionary<string, int> alerted, bool enabled)
+    {
         foreach (var id in alerted.Keys.Where(id => !readings.Any(r => r.Id == id)).ToArray()) alerted.Remove(id);
         var low = new List<string>();
         foreach (var r in readings.Where(r => !r.Stale))
         {
             if (r.Charging || r.FullOnPower) { alerted.Remove(r.Id); continue; }
-            if (r.IsReference) continue;
+            if (r.IsReference || r.ReportedPower is HidPower.ExternalReference or HidPower.Unknown) continue;
             if (r.Percent > 20) { alerted.Remove(r.Id); continue; }
             int threshold = r.Percent <= 5 ? 5 : r.Percent <= 10 ? 10 : 20;
-            if (!Settings.Notifications || alerted.TryGetValue(r.Id,out int sent) && sent <= threshold) continue;
+            if (!enabled || alerted.TryGetValue(r.Id,out int sent) && sent <= threshold) continue;
             alerted[r.Id] = threshold;
             low.Add($"{r.Name} 剩余 {r.Percent}%");
         }
-        if (low.Count == 0 || restartOffered) return;
-        launcher.Visible = true;
-        launcher.ShowBalloonTip(5000, "外设电量", string.Join("；", low), ToolTipIcon.Warning);
+        return low;
     }
 
     protected override void ExitThreadCore()

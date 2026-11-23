@@ -29,6 +29,7 @@ internal static class Checks
             return;
         }
         HidRuleChecks.Run(Require);
+        HidRuleChecks.CheckScanIntegration(Require);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         var area = new Rectangle(-200, 0, 200, 40);

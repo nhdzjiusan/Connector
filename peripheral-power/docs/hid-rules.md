@@ -42,7 +42,11 @@
 
 启动时从内嵌资源加载默认规则，再按文件名排序读取 `%LOCALAPPDATA%\PeripheralPower\rules\*.json`。通过校验的文件按 `id` 覆盖，在后文件优先。校验失败时记录错误并保留已有规则。`builtinDriver` 仅供固定内置驱动使用，与 `query`、`response`、`parse` 互斥。
 
-外部规则需要确切的 VID、PID、Usage 和厂商 Usage Page `0xFF01–0xFFFF`。标准键鼠等系统页面、通用厂商页面 `0xFF00` 与已知 HalfKay 标识 `16C0:0478` 会被拒绝。厂商自定义代码的含义由设备固件决定，仅使用已确认用于电量读取的命令。[Windows HID 顶层集合](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hidclass-hardware-ids-for-top-level-collections) · [HalfKay 标识](https://www.pjrc.com/teensy/check_halfkay.html)
+外部规则需要确切的 VID、PID、Usage 和厂商 Usage Page `0xFF01–0xFFFF`。标准键鼠等系统页面、通用厂商页面 `0xFF00`，以及已知 HalfKay、BootloadHID 和 QMK HID 引导程序标识会被拒绝。厂商自定义代码的含义由设备固件决定，仅使用已确认用于电量读取的命令。[Windows HID 顶层集合](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hidclass-hardware-ids-for-top-level-collections) · [HalfKay 标识](https://www.pjrc.com/teensy/check_halfkay.html) · [QMK 引导程序标识](https://github.com/qmk/qmk_firmware/blob/master/docs/driver_installation_zadig.md)
+
+USB 扫描只打开匹配到该厂商集合的 HID 路径。外部规则的写入报文还必须匹配该集合声明的 Report ID 和长度。每轮沿用三秒 USB 预算，同一设备路径通过互斥锁串行访问。
+
+同一 `deviceGroup` 的新读数按 `priority` 取最高值，G3 V2 有线读数优先。有线无结果时可使用同组无线读数。组仍存在但未取得有效读数时，面板保留上次电量和采样时间。内置规则还包括 G87 V2 和 G9 Pro 接收器。G3 V2 接收器的内置驱动先确认设备可用，再执行电量规则。
 
 ## 离线回放
 

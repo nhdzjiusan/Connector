@@ -10,6 +10,19 @@ internal interface IHidReportChannel
 
 internal static class HidRuleEngine
 {
+    internal static HidRuleResult Execute(HidRule rule, HidRuleDocument catalog, IHidReportChannel channel,
+        Action<byte[], string>? onFrame = null)
+    {
+        if (rule.BuiltinDriver is null) return Execute(rule.Transaction, channel, onFrame: onFrame);
+
+        // The receiver needs a successful availability probe before the battery exchange.
+        // Both exchanges still use the same declarative parser and the same open channel.
+        var phases = catalog.DriverSteps![rule.BuiltinDriver];
+        var status = Execute(phases[0], channel, onFrame: onFrame);
+        return status.Disposition == HidDisposition.Accepted
+            ? Execute(phases[1], channel, onFrame: onFrame) : status;
+    }
+
     internal static byte[] BuildQuery(HidQuery query)
     {
         if (query.Mode == HidQueryMode.PassiveListen) return [];

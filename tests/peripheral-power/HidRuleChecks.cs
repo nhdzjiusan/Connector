@@ -74,6 +74,81 @@ internal static class HidRuleChecks
         CheckLoader(check);
     }
 
+    internal static void CheckScanIntegration(Action<bool, string> check)
+    {
+        var catalog = HidRuleLoader.LoadEmbedded();
+        HidRule Rule(string id) => catalog.Rules.Single(rule => rule.Id == id);
+        var wired = Rule("mchose-g3-v2-wired");
+        var receiver = Rule("mchose-g3-v2-receiver");
+        var keyboard = Rule("mchose-g87-v2-receiver");
+        var headset = Rule("mchose-g9-pro-receiver");
+        check(catalog.Rules.Length == 4 && wired.BuiltinDriver is null && keyboard.BuiltinDriver is null &&
+            headset.BuiltinDriver is null && receiver.BuiltinDriver == HidRuleLoader.G3Receiver,
+            "ship three declarative HID endpoints and one two-phase G3 receiver");
+
+        byte[] g3Probe = [0, 0xAA, 0xED, 0, 0, 0, 0, 0, 0, 0];
+        byte[] g3Battery = [0, 0xAA, 0x30, 0, 0, 0, 0, 0, 0, 12, 0];
+        var radioChannel = new Replay([g3Probe, g3Battery]);
+        var radioResult = HidRuleEngine.Execute(receiver, catalog, radioChannel);
+        check(radioResult.Sample == new HidSample(12, HidPower.Discharging) && radioChannel.Writes.Count == 2,
+            "receiver probes availability before querying battery on the same channel");
+        byte[] fullWired = (byte[])g3Battery.Clone();
+        fullWired[9] = 100;
+        var wiredResult = HidRuleEngine.Execute(wired, catalog, new Replay([fullWired]));
+        var wirelessReading = new UsbBattery.EndpointReading(receiver, radioResult.Sample!.Value);
+        var wiredReading = new UsbBattery.EndpointReading(wired, wiredResult.Sample!.Value);
+        foreach (UsbBattery.EndpointReading[] order in new[] { new[] { wiredReading, wirelessReading }, [wirelessReading, wiredReading] })
+            check(UsbBattery.SelectReadings(order).Single() is
+                { Id: "usb-Mouse", Percent: 100, Connection: "USB", FullOnPower: true }, "prefer wired priority regardless of completion order");
+        check(UsbBattery.SelectReadings([wirelessReading]).Single() is { Id: "usb-Mouse", Percent: 12, Connection: "2.4 GHz" },
+            "use receiver reading when wired has no fresh result");
+
+        byte[] sleep = (byte[])g3Probe.Clone();
+        sleep[9] = 1;
+        var asleepChannel = new Replay([sleep, g3Battery]);
+        var result = HidRuleEngine.Execute(receiver, catalog, asleepChannel);
+        var last = new DateTime(2026, 11, 23, 9, 30, 0);
+        var old = UsbBattery.SelectReadings([wirelessReading])[0] with { SampledAt = last };
+        var held = PowerContext.Merge([old], "usb-", new([], [UsbBattery.ReadingId(receiver)], true),
+            topologyChanged: true, last.AddMinutes(10)).Single();
+        check(result.Disposition == HidDisposition.Asleep && result.Sample is null &&
+            asleepChannel.Writes.Count == 1 && held is { Stale: true, Percent: 12 } && held.SampledAt == last,
+            "sleep skips the battery command and keeps the group's last sample time");
+
+        byte[] g87 = new byte[20];
+        g87[0] = 0x13;
+        g87[1] = 0x4A;
+        g87[4] = 2;
+        g87[5] = 80;
+        g87[6] = 0x11;
+        g87[19] = (byte)g87.Take(19).Sum(b => b);
+        check(HidRuleEngine.Execute(keyboard, catalog, new Replay([g87])).Sample == new HidSample(80, HidPower.Full),
+            "G87 checked 20-byte reply recognizes plugged full nibble");
+
+        var g9 = new Replay([[0x55, 0x65, 1, 0], [0x55, 0x65, 8, 0]]);
+        var g9Result = HidRuleEngine.Execute(headset, catalog, g9);
+        check(g9Result.Sample == new HidSample(8, HidPower.Unknown, true) && g9.InputReads == 2 &&
+            HidRuleEngine.Execute(headset, catalog, new Replay([[0x55, 0x65, 8, 3]])).Sample ==
+                new HidSample(8, HidPower.Charging, true), "G9 rejects request echo and preserves uncertain and reference-charging states");
+
+        var alerts = new Dictionary<string, int>();
+        var unknown = UsbBattery.SelectReadings([new(headset, g9Result.Sample!.Value with { IsReference = false })]).Single();
+        var reference = UsbBattery.SelectReadings([new(headset, new(8, HidPower.ExternalReference))]).Single();
+        var discharging = UsbBattery.SelectReadings([new(headset, new(8, HidPower.Discharging))]).Single();
+        check(PowerContext.CollectLowBatteryAlerts([unknown], alerts, true).Count == 0 &&
+            PowerContext.CollectLowBatteryAlerts([reference], alerts, true).Count == 0 &&
+            reference.PowerStatus == "参考电量 · 已接外部电源" &&
+            PowerContext.CollectLowBatteryAlerts([held], alerts, true).Count == 0 && alerts.Count == 0 &&
+            PowerContext.CollectLowBatteryAlerts([discharging], alerts, true).Count == 1 &&
+            PowerContext.CollectLowBatteryAlerts([discharging], alerts, true).Count == 0,
+            "suppress unknown, external reference and stale alerts while deduplicating confirmed low battery");
+
+        var alias = UsbBattery.AddLegacyAliases(catalog, catalog, [new(4660, 22136, 0xFF010010, "Legacy mouse", DeviceKind.Mouse)])
+            .Rules.Single(rule => rule.Match.Vid == 4660);
+        check(alias.BuiltinDriver == receiver.BuiltinDriver && UsbBattery.ReadingId(alias) == "usb-1234-5678-FF010010",
+            "legacy alias uses the built-in receiver and keeps its existing stable reading ID");
+    }
+
     private const string Example = """
         {
           "id":"mock", "name":"Mock", "kind":"mouse",
@@ -106,6 +181,7 @@ internal static class HidRuleChecks
             {
                 (Example.Replace("\"pids\":[22136]", "\"pids\":[0]"), "wildcard PID"),
                 (Example.Replace("\"vid\":4660,\"pids\":[22136]", "\"vid\":5824,\"pids\":[1144]"), "known bootloader"),
+                (Example.Replace("\"vid\":4660,\"pids\":[22136]", "\"vid\":1003,\"pids\":[8295]"), "known QMK bootloader"),
                 (Example.Replace("\"usagePage\":65281", "\"usagePage\":65280"), "generic vendor usage page"),
                 (Example.Replace("\"index\":1", "\"index\":2"), "out of bounds parse"),
                 (Example.Replace("\"kind\":\"mouse\"", "\"kind\":\"mouse\",\"builtinDriver\":\"mchose_g3_v2_receiver\""), "external builtinDriver"),

@@ -52,7 +52,9 @@ Windows 10 2004 及更新版本的 x64 托盘应用。独立发布的可执行�
 
 错误日志位于 `%LOCALAPPDATA%\PeripheralPower\logs\error-YYYY-MM-DD.log`，单文件最多 1 MiB，当天前一卷为 `.log.1`。`--scan <已存在目录中的文件.json>` 写出读取结果和诊断明细；partial 为 true 表示结果不完整。反馈前请遮盖设备标识、序列号、用户名和个人路径。
 
-可选的 `%LOCALAPPDATA%\PeripheralPower\protocols.json` 为数组。每项指定十进制整数 vendor、product、usage，名称 name 和类型 kind（Mouse、Keyboard、Headset）。usage 为 Usage Page 左移 16 位再加 Usage。仅应加入已确认使用同一内置协议的设备。启动时合并白名单，重复项优先内置配置。文件只做固定电量协议匹配，不执行脚本或自定义报文。缺失时使用内置表；格式错误时回退并记错。
+USB 启动时加载内置电量规则，并从 `%LOCALAPPDATA%\PeripheralPower\rules\*.json` 读取用户规则。[规则格式、校验与离线回放](docs/hid-rules.md)
+
+已有 `%LOCALAPPDATA%\PeripheralPower\protocols.json` 可以继续作为兼容别名。每项指定十进制整数 vendor、product、usage，名称 name 和类型 kind（Mouse、Keyboard、Headset）。usage 为 Usage Page 左移 16 位再加 Usage。别名绑定已内置的接收器协议，重复匹配优先使用正式规则。格式或身份校验失败会写入错误日志，并继续使用已加载的规则。
 
 ## 验证下载与签名
 

@@ -1,1 +1,296 @@
-{"rules":[]}
+{
+  "rules": [
+    {
+      "id": "mchose-g3-v2-wired",
+      "name": "MCHOSE G3 V2",
+      "kind": "mouse",
+      "match": {
+        "vid": 14391,
+        "pids": [
+          16780
+        ],
+        "usagePage": 65281,
+        "usage": 16,
+        "deviceGroup": "Mouse",
+        "transport": "wired",
+        "priority": 100,
+        "minInput": 11,
+        "minOutput": 9
+      },
+      "query": {
+        "mode": "output_then_input",
+        "length": 9,
+        "bytes": { "0": 0, "1": 85, "2": 48, "3": 165, "4": 11, "5": 46, "6": 1, "7": 1, "8": 1 }
+      },
+      "response": {
+        "minLength": 11,
+        "maxReads": 8,
+        "expect": [
+          [
+            { "index": 1, "equal": 170 },
+            { "index": 2, "equal": 48 },
+            { "index": 9, "max": 100 }
+          ]
+        ]
+      },
+      "parse": {
+        "level": {
+          "field": { "index": 9 },
+          "decode": "percent"
+        },
+        "defaultPower": "discharging",
+        "states": [
+          {
+            "power": "full",
+            "when": [
+              [
+                { "index": 9, "equal": 100 }
+              ]
+            ]
+          },
+          {
+            "power": "charging",
+            "when": [
+              [
+                { "index": 10, "equal": 1 }
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "mchose-g3-v2-receiver",
+      "name": "MCHOSE G3 V2",
+      "kind": "mouse",
+      "match": {
+        "vid": 14391,
+        "pids": [
+          16965
+        ],
+        "usagePage": 65281,
+        "usage": 16,
+        "deviceGroup": "Mouse",
+        "transport": "receiver",
+        "priority": 10,
+        "minInput": 11,
+        "minOutput": 9
+      },
+      "builtinDriver": "mchose_g3_v2_receiver"
+    },
+    {
+      "id": "mchose-g87-v2-receiver",
+      "name": "MCHOSE G87 V2",
+      "kind": "keyboard",
+      "match": {
+        "vid": 14391,
+        "pids": [
+          8219
+        ],
+        "usagePage": 65282,
+        "usage": 2,
+        "deviceGroup": "Keyboard",
+        "transport": "receiver",
+        "priority": 10,
+        "minInput": 20,
+        "minOutput": 20
+      },
+      "query": {
+        "mode": "output_then_input",
+        "length": 20,
+        "bytes": { "0": 19, "1": 74, "2": 1 },
+        "checksum": { "kind": "sum8", "start": 0, "end": 19, "index": 19 }
+      },
+      "response": {
+        "minLength": 20,
+        "exactLength": 20,
+        "maxReads": 8,
+        "expect": [
+          [
+            { "index": 0, "equal": 19 },
+            { "index": 1, "equal": 74 },
+            { "index": 4, "min": 2 },
+            { "index": 5, "max": 100 }
+          ]
+        ],
+        "checksum": { "kind": "sum8", "start": 0, "end": 19, "index": 19 }
+      },
+      "parse": {
+        "level": {
+          "field": { "index": 5 },
+          "decode": "percent"
+        },
+        "defaultPower": "discharging",
+        "states": [
+          {
+            "power": "full",
+            "when": [
+              [
+                { "index": 6, "mask": 240, "shift": 4, "equal": 1 },
+                { "index": 6, "mask": 15, "equal": 1 }
+              ],
+              [
+                { "index": 6, "mask": 240, "shift": 4, "equal": 1 },
+                { "index": 5, "equal": 100 }
+              ]
+            ]
+          },
+          {
+            "power": "charging",
+            "when": [
+              [
+                { "index": 6, "mask": 240, "shift": 4, "equal": 1 }
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "mchose-g9-pro-receiver",
+      "name": "MCHOSE G9 Pro",
+      "kind": "headset",
+      "match": {
+        "vid": 10525,
+        "pids": [
+          14429
+        ],
+        "usagePage": 65424,
+        "usage": 1,
+        "deviceGroup": "Headset",
+        "transport": "receiver",
+        "priority": 10,
+        "minInput": 4,
+        "minOutput": 3
+      },
+      "query": {
+        "mode": "output_then_input",
+        "length": 3,
+        "bytes": { "0": 85, "1": 101, "2": 1 }
+      },
+      "response": {
+        "minLength": 4,
+        "maxReads": 8,
+        "expect": [
+          [
+            { "index": 0, "equal": 85 },
+            { "index": 1, "equal": 101 },
+            { "index": 2, "max": 100 },
+            { "index": 3, "min": 2, "max": 4 }
+          ],
+          [
+            { "index": 0, "equal": 85 },
+            { "index": 1, "equal": 101 },
+            { "index": 2, "min": 2, "max": 100 },
+            { "index": 3, "equal": 0 }
+          ]
+        ]
+      },
+      "parse": {
+        "level": {
+          "field": { "index": 2 },
+          "decode": "percent"
+        },
+        "defaultPower": "discharging",
+        "states": [
+          {
+            "power": "unknown",
+            "when": [
+              [
+                { "index": 3, "equal": 0 }
+              ]
+            ],
+            "isReference": true
+          },
+          {
+            "power": "charging",
+            "when": [
+              [
+                { "index": 3, "equal": 3 }
+              ]
+            ],
+            "isReference": true
+          },
+          {
+            "power": "full",
+            "when": [
+              [
+                { "index": 3, "equal": 4 }
+              ]
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "driverSteps": {
+    "mchose_g3_v2_receiver": [
+      {
+        "query": {
+          "mode": "output_then_input",
+          "length": 3,
+          "bytes": { "0": 0, "1": 85, "2": 237 }
+        },
+        "response": {
+          "minLength": 10,
+          "maxReads": 8,
+          "expect": [
+            [
+              { "index": 1, "equal": 170 },
+              { "index": 2, "equal": 237 }
+            ]
+          ],
+          "asleepWhen": [
+            [
+              { "index": 9, "equal": 1 }
+            ]
+          ]
+        }
+      },
+      {
+        "query": {
+          "mode": "output_then_input",
+          "length": 9,
+          "bytes": { "0": 0, "1": 85, "2": 48, "3": 165, "4": 11, "5": 46, "6": 1, "7": 1, "8": 1 }
+        },
+        "response": {
+          "minLength": 11,
+          "maxReads": 8,
+          "expect": [
+            [
+              { "index": 1, "equal": 170 },
+              { "index": 2, "equal": 48 },
+              { "index": 9, "max": 100 }
+            ]
+          ]
+        },
+        "parse": {
+          "level": {
+            "field": { "index": 9 },
+            "decode": "percent"
+          },
+          "defaultPower": "discharging",
+          "states": [
+            {
+              "power": "full",
+              "when": [
+                [
+                  { "index": 9, "equal": 100 },
+                  { "index": 10, "equal": 1 }
+                ]
+              ]
+            },
+            {
+              "power": "charging",
+              "when": [
+                [
+                  { "index": 10, "equal": 1 }
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

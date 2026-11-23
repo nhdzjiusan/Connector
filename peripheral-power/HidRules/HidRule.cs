@@ -14,6 +14,9 @@ internal sealed record HidRule(string Id, string Name, DeviceKind Kind, HidMatch
     HidQuery? Query = null, HidResponse? Response = null, HidParse? Parse = null, string? BuiltinDriver = null)
 {
     [JsonIgnore]
+    internal bool AllowUndescribedOutput { get; init; }
+
+    [JsonIgnore]
     public HidTransaction Transaction => new(Query!, Response!, Parse);
 }
 
