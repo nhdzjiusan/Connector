@@ -1,0 +1,36 @@
+name: 外设电量故障报告
+description: 报告读取、显示或启动问题，请先脱敏
+title: "[外设电量] "
+body:
+  - type: input
+    id: environment
+    attributes:
+      label: 软件版本及 Windows 版本/内部版本
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: 设备完整型号、连接方式和供电状态
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤、预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: scan
+    attributes:
+      label: --scan 输出
+      description: 粘贴脱敏后的 JSON 或说明为何无法取得；移除设备标识、序列号和个人路径。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志路径与相关错误
+      description: '默认 %LOCALAPPDATA%\PeripheralPower\logs\error-YYYY-MM-DD.log。请用环境变量代替用户名；没有日志请注明。'
+    validations:
+      required: true

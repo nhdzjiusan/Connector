@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="58" viewBox="0 0 360 58">
+ <title>Windows 通知区域示意，向上箭头可展开隐藏的托盘图标</title>
+ <rect width="360" height="58" rx="9" fill="#24303e"/>
+ <g fill="white" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="16">
+  <text x="15" y="35">隐藏的图标</text><path d="M120 34l8-9 8 9" fill="none" stroke="#93e8e1" stroke-width="3"/>
+  <text x="165" y="35">通知区域</text><text x="293" y="35">09:30</text>
+ </g>
+</svg>
