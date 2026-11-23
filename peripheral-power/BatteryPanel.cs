@@ -6,8 +6,8 @@ internal sealed class BatteryPanel : Form
 {
     private readonly bool? themeOverride;
     internal bool Dark { get; private set; }
-    internal Color Ink => Dark ? Color.FromArgb(241, 248, 255) : Color.FromArgb(20, 41, 65);
-    internal Color Muted => Dark ? Color.FromArgb(190, 208, 227) : Color.FromArgb(61, 83, 107);
+    internal Color Ink => SystemInformation.HighContrast ? SystemColors.WindowText : Dark ? Color.FromArgb(241, 248, 255) : Color.FromArgb(20, 41, 65);
+    internal Color Muted => SystemInformation.HighContrast ? SystemColors.WindowText : Dark ? Color.FromArgb(190, 208, 227) : Color.FromArgb(61, 83, 107);
     private Bitmap? material;
     private readonly System.Windows.Forms.Timer lightTimer = new() { Interval = 40 };
     private Point? light;
@@ -25,6 +25,9 @@ internal sealed class BatteryPanel : Form
     private readonly Label intervalLabel = new() { Text = "刷新间隔" };
     private readonly ComboBox interval = new() { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "刷新间隔" };
     private readonly CheckBox startup = new() { Text = "登录时启动", AutoSize = true };
+    private readonly CheckBox notifications = new() { Text = "低电量提醒", AutoSize = true, BackColor = Color.Transparent };
+    public event Action<bool>? NotificationsChanged;
+    public void SetNotifications(bool enabled) { updating = true; notifications.Checked = enabled; updating = false; }
     private readonly Button exit = new() { Text = "退出应用" };
     private readonly Label empty = new() { Text = "暂无可显示电量的外设\r\n唤醒无线设备后，可点「立即刷新」。" };
     private IReadOnlyList<BatteryReading> readings = [];
@@ -84,14 +87,15 @@ internal sealed class BatteryPanel : Form
             Point cursor = PointToClient(Cursor.Position);
             Point? next = ClientRectangle.Contains(cursor) ? cursor : null;
             if (next == light) return;
+            if (light is Point old) Invalidate(GlowBounds(old), true);
             light = next;
-            Invalidate(true);
+            if (next is Point current) Invalidate(GlowBounds(current), true);
         };
         list.Scroll += (_, _) => Invalidate(true);
         list.MouseWheel += (_, _) => Invalidate(true);
         VisibleChanged += (_, _) =>
         {
-            lightTimer.Enabled = Visible;
+            lightTimer.Enabled = Visible && MotionAllowed;
             if (!Visible) light = null;
         };
         refresh.Click += (_, _) => RefreshRequested?.Invoke();
@@ -102,6 +106,8 @@ internal sealed class BatteryPanel : Form
             if (!updating && interval.SelectedIndex >= 0) IntervalChanged?.Invoke(IntervalMinutes);
         };
         startup.CheckedChanged += (_, _) => { if (!updating) StartupChanged?.Invoke(startup.Checked); };
+        notifications.CheckedChanged += (_,_) => { if (!updating) NotificationsChanged?.Invoke(notifications.Checked); };
+        Controls.Add(notifications);
 
         Controls.AddRange([title, status, refresh, list, settingsLabel, intervalLabel, interval, startup, exit]);
         list.Controls.Add(empty);
@@ -134,9 +140,18 @@ internal sealed class BatteryPanel : Form
 
     private void ApplyTheme()
     {
-        bool nextDark = themeOverride ?? (Microsoft.Win32.Registry.GetValue(
+        bool nextDark = themeOverride ?? (Settings.Theme switch { "light" => false, "dark" => true, _ => (Microsoft.Win32.Registry.GetValue(
             @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            "AppsUseLightTheme", 1) is int value && value == 0);
+            "AppsUseLightTheme", 1) is int value && value == 0) });
+        lightTimer.Enabled = Visible && MotionAllowed;
+        if (!MotionAllowed) light = null;
+        if (SystemInformation.HighContrast)
+        {
+            BackColor = SystemColors.Window; ForeColor = SystemColors.WindowText;
+            status.ForeColor = intervalLabel.ForeColor = empty.ForeColor = exit.ForeColor = refresh.ForeColor = SystemColors.WindowText;
+            interval.BackColor = SystemColors.Window; interval.ForeColor = SystemColors.WindowText;
+            ResetMaterial(); return;
+        }
         if (material != null && nextDark == Dark) return;
         Dark = nextDark;
         BackColor = Dark ? Color.FromArgb(27, 45, 67) : Color.FromArgb(213, 233, 244);
@@ -192,11 +207,20 @@ internal sealed class BatteryPanel : Form
 
         if (!changed) return;
         list.SuspendLayout();
-        foreach (var card in list.Controls.OfType<DeviceCard>().ToArray()) card.Dispose();
+        var scroll = list.AutoScrollPosition;
+        var cards = list.Controls.OfType<DeviceCard>().ToDictionary(c => c.Id);
+        bool layout = cards.Count != data.Count || !cards.Keys.SequenceEqual(data.Select(r => r.Id));
         empty.Visible = readings.Count == 0;
-        foreach (var reading in readings) list.Controls.Add(new DeviceCard(reading));
-        LayoutPanel();
-        if (Visible) PlaceWindow();
+        int index = 0;
+        foreach (var reading in data)
+        {
+            if (cards.Remove(reading.Id,out var card)) card.UpdateReading(reading);
+            else list.Controls.Add(card = new DeviceCard(reading));
+            if (layout) list.Controls.SetChildIndex(card,index);
+            index++;
+        }
+        foreach (var old in cards.Values) old.Dispose();
+        if (layout) { LayoutPanel(); list.AutoScrollPosition = new Point(-scroll.X,-scroll.Y); if (Visible) PlaceWindow(); }
         list.ResumeLayout();
     }
 
@@ -236,6 +260,8 @@ internal sealed class BatteryPanel : Form
     }
 
     private int S(int x) => (int)Math.Round(x * DeviceDpi / 96.0);
+    private bool MotionAllowed => !SystemInformation.HighContrast && System.Windows.SystemParameters.ClientAreaAnimation;
+    private Rectangle GlowBounds(Point p) => new(p.X-S(92),p.Y-S(66),S(184),S(132));
 
     private void LayoutPanel()
     {
@@ -253,6 +279,7 @@ internal sealed class BatteryPanel : Form
         intervalLabel.SetBounds(S(32), S(settingsTop + 49), S(67), S(23));
         interval.SetBounds(S(105), S(settingsTop + 46), S(97), S(28));
         startup.Location = new Point(S(241), S(settingsTop + 48));
+        notifications.Location = new Point(S(151), S(settingsTop + 12));
         exit.SetBounds(S(336), S(settingsTop + 9), S(80), S(27));
         empty.Bounds = new Rectangle(0, 0, list.Width, list.Height);
         empty.Visible = readings.Count == 0;
@@ -288,6 +315,7 @@ internal sealed class BatteryPanel : Form
 
     protected override void OnPaintBackground(PaintEventArgs e)
     {
+        if (SystemInformation.HighContrast) { e.Graphics.Clear(SystemColors.Window); return; }
         if (listHeight == 0) { base.OnPaintBackground(e); return; }
         float scale = DeviceDpi / 96f;
         int scroll = -list.AutoScrollPosition.Y;
@@ -342,7 +370,14 @@ internal sealed class BatteryPanel : Form
 
 internal sealed class DeviceCard : Control
 {
-    private readonly BatteryReading battery;
+    private BatteryReading battery;
+    public string Id => battery.Id;
+    public void UpdateReading(BatteryReading next)
+    {
+        if (battery == next) return;
+        battery = next; AccessibleName = $"{next.Name}，{next.Percent}% {next.PowerStatus}".TrimEnd();
+        Invalidate();
+    }
 
     public DeviceCard(BatteryReading battery)
     {
@@ -384,6 +419,7 @@ internal sealed class DeviceCard : Control
                 battery.Percent <= 40 ? Color.FromArgb(255, 212, 148) : Color.FromArgb(149, 238, 209);
             palette = (color, Color.FromArgb(78, 106, 129));
         }
+        if (SystemInformation.HighContrast) palette = (SystemColors.WindowText,SystemColors.ControlDark);
         using var batteryInk = new SolidBrush(palette.Foreground);
         var source = $"{TrayArt.DeviceLabel(battery.Kind)}  ·  {battery.Connection}";
         if (battery.PowerStatus.Length > 0) source += $"  ·  {battery.PowerStatus}";

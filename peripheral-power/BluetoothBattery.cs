@@ -40,8 +40,7 @@ internal static class BluetoothBattery
 
     private static async Task<BatteryReading?> ReadDeviceAsync(DeviceInformation info, CancellationToken timeout)
     {
-        var kind = Classify(info);
-        if (kind == null) return null;
+        var kind = Classify(info) ?? DeviceKind.Generic;
 
         try
         {
@@ -60,15 +59,23 @@ internal static class BluetoothBattery
                     foreach (var characteristic in chars.Characteristics)
                     {
                         if (!characteristic.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Read)) continue;
-                        var battery = await characteristic.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(timeout);
-                        if (battery.Status != GattCommunicationStatus.Success || battery.Value.Length != 1) continue;
-                        using var data = DataReader.FromBuffer(battery.Value);
-                        var value = data.ReadByte();
-                        if (value <= 100) percent = Math.Min(value, percent ?? 100);
+                        foreach (var cache in new[]{BluetoothCacheMode.Cached,BluetoothCacheMode.Uncached})
+                        {
+                            GattReadResult battery;
+                            try { battery = await characteristic.ReadValueAsync(cache).AsTask(timeout); }
+                            catch (System.Runtime.InteropServices.COMException e) when (cache == BluetoothCacheMode.Cached)
+                            { ErrorLog.Write("读取蓝牙缓存",e); continue; }
+                            if (battery.Status != GattCommunicationStatus.Success || battery.Value?.Length != 1) continue;
+                            using var data = DataReader.FromBuffer(battery.Value);
+                            var value = data.ReadByte();
+                            if (value > 100) continue;
+                            percent = Math.Min(value, percent ?? 100);
+                            break;
+                        }
                     }
                 }
                 return percent is { } level ? new BatteryReading("ble-" + info.Id,
-                    info.Name, kind.Value, level, false, "蓝牙") : null;
+                    info.Name, kind, level, false, "蓝牙") : null;
             }
             finally
             {

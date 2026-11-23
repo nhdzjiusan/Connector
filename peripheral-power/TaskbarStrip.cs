@@ -21,6 +21,7 @@ internal sealed class TaskbarStrip : Form
     private Color foreground;
     public event Action<bool>? AvailabilityChanged;
     private bool available;
+    private bool measureErrorReported;
 
     public TaskbarStrip()
     {
@@ -124,13 +125,18 @@ internal sealed class TaskbarStrip : Form
             });
             if (IsDisposed) return;
             occupied = result;
+            measureErrorReported = false;
             var ink = Equals(Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
                 "SystemUsesLightTheme", 0), 1) ? Color.FromArgb(30,30,30) : Color.White;
             if (ink != foreground) { foreground = ink; dirty = true; }
             measuredBar = bar;
         }
         catch (Exception e) when (e is ElementNotAvailableException or InvalidOperationException or COMException or UnauthorizedAccessException)
-        { occupied = []; }
+        {
+            occupied = [];
+            if (!measureErrorReported) ErrorLog.Write("任务栏定位",e);
+            measureErrorReported = true;
+        }
         finally { measuring = false; nextMeasure = Environment.TickCount64 + 3000; }
     }
 

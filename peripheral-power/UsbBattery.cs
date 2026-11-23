@@ -8,27 +8,51 @@ using Microsoft.Win32.SafeHandles;
 
 namespace PeripheralPower;
 
-internal enum DeviceKind { Mouse, Keyboard, Headset }
+internal enum DeviceKind { Mouse, Keyboard, Headset, Generic }
 
 internal sealed record BatteryReading(string Id, string Name, DeviceKind Kind, int Percent, bool Charging,
     string Connection, bool IsReference = false, bool FullOnPower = false, DateTime? SampledAt = null, bool Stale = false)
 {
     public string PowerStatus => Stale ? $"参考电量 · 上次更新 {SampledAt:HH:mm}" : FullOnPower ? "已充满 · 电源已连接" :
         Charging && IsReference ? "充电中 · 参考电量" : Charging ? "充电中" :
-        IsReference ? "已接电源 · 参考电量" : "";
+        IsReference ? "参考电量 · 供电状态未知" : "";
 }
 
 internal static class UsbBattery
 {
     private readonly record struct BatterySample(int Percent, bool Charging, bool IsReference = false, bool FullOnPower = false);
-    private sealed record Protocol(int Vendor, int Product, uint Usage, string Name, DeviceKind Kind);
-    private static readonly Protocol[] Protocols =
+    private sealed record Protocol(int Vendor, int Product, uint Usage, string Name, DeviceKind Kind)
+    {
+        public string Id => Builtins.Contains(this) ? $"usb-{Kind}" : $"usb-{Vendor:X4}-{Product:X4}-{Usage:X8}";
+    }
+    private static readonly Protocol[] Builtins =
     [
         new(0x3837, 0x418C, 0xFF010010, "MCHOSE G3 V2", DeviceKind.Mouse),
         new(0x3837, 0x4245, 0xFF010010, "MCHOSE G3 V2", DeviceKind.Mouse),
         new(0x3837, 0x201B, 0xFF020002, "MCHOSE G87 V2", DeviceKind.Keyboard),
         new(0x291D, 0x385D, 0xFF900001, "MCHOSE G9 Pro", DeviceKind.Headset)
     ];
+    private static readonly Lazy<Protocol[]> Protocols = new(LoadProtocols);
+    private static Protocol[] LoadProtocols()
+    {
+        string path = Path.Combine(Settings.Folder,"protocols.json");
+        if (!File.Exists(path)) return Builtins;
+        try
+        {
+            var json = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+            json.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter<DeviceKind>(allowIntegerValues:false));
+            if (new FileInfo(path).Length > 32768) throw new InvalidDataException("协议文件过大");
+            var extra = System.Text.Json.JsonSerializer.Deserialize<Protocol[]>(File.ReadAllText(path),json)
+                ?? throw new InvalidDataException("需要协议数组");
+            if (extra.Length > 64 || extra.Any(p => p == null || p.Vendor is <1 or >65535 || p.Product is <1 or >65535 ||
+                string.IsNullOrWhiteSpace(p.Name) || p.Kind == DeviceKind.Generic || p.Usage != (p.Kind switch
+                    {DeviceKind.Mouse => 0xFF010010u, DeviceKind.Keyboard => 0xFF020002u, _ => 0xFF900001u})))
+                throw new InvalidDataException("设备标识或 Usage 与内置协议不匹配");
+            return Builtins.Concat(extra).DistinctBy(p => (p.Vendor,p.Product,p.Usage)).ToArray();
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        { ErrorLog.Write("protocols.json",e); return Builtins; }
+    }
 
     private static readonly SemaphoreSlim Enumeration = new(1);
 
@@ -48,9 +72,9 @@ internal static class UsbBattery
             });
             ObserveFailure(inventory);
             var devices = await inventory.WaitAsync(budget.Token).ConfigureAwait(false);
-            var matches = (from p in Protocols from d in devices
+            var matches = (from p in Protocols.Value from d in devices
                 where d.VendorID == p.Vendor && d.ProductID == p.Product select (p,d)).ToArray();
-            present = matches.Select(m => "usb-" + m.p.Kind).ToHashSet();
+            present = matches.Select(m => m.p.Id).ToHashSet();
             tasks = matches.Select(m => Task.Run(() =>
             {
                 string path = m.d.DevicePath;
@@ -98,7 +122,7 @@ internal static class UsbBattery
                     stream.WriteTimeout = 550;
                     BatterySample? value = protocol.Kind switch
                     {
-                        DeviceKind.Mouse => ReadMouse(device, stream, protocol.Product == 0x4245, diagnostic),
+                        DeviceKind.Mouse => ReadMouse(device, stream, !(protocol.Vendor == 0x3837 && protocol.Product == 0x418C), diagnostic),
                         DeviceKind.Keyboard => ReadKeyboard(device, stream, diagnostic),
                         DeviceKind.Headset => ReadHeadset(device, stream, diagnostic),
                         _ => null
@@ -106,7 +130,7 @@ internal static class UsbBattery
                     if (value is not { } battery) continue;
 
                     var name = protocol.Kind == DeviceKind.Headset ? device.GetProductName() : protocol.Name;
-                    return new BatteryReading($"usb-{protocol.Kind}", name, protocol.Kind,
+                    return new BatteryReading(protocol.Id, name, protocol.Kind,
                         battery.Percent, battery.Charging, protocol.Product == 0x418C ? "USB" : "2.4 GHz",
                         battery.IsReference, battery.FullOnPower);
                 }
@@ -176,7 +200,9 @@ internal static class UsbBattery
     }
 
     private static BatterySample HeadsetSample(int percent, byte status) =>
-        new(percent, Charging: status == 3, IsReference: status == 3, FullOnPower: status == 4);
+        // Status zero has also been seen without independently confirmed USB power.
+        // Keep its numeric report as a reference; only 3 and 4 confirm charging/full.
+        new(percent, Charging: status == 3, IsReference: status is 0 or 3, FullOnPower: status == 4);
 
     private static bool IsHeadsetBatteryReply(byte[] data)
     {

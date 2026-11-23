@@ -18,6 +18,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="PeripheralPower.Check" />
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
     <PackageReference Include="HidSharp" Version="2.6.4" />
     <EmbeddedResource Include="HidSharp-LICENSE.txt" />

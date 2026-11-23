@@ -118,7 +118,8 @@ internal static class TrayArt
     {
         DeviceKind.Mouse => "鼠标",
         DeviceKind.Keyboard => "键盘",
-        _ => "耳机"
+        DeviceKind.Headset => "耳机",
+        _ => "设备"
     };
 
     public static void DeviceGlyph(Graphics g, DeviceKind kind, float x, float y, Color? color = null)
@@ -131,6 +132,10 @@ internal static class TrayArt
         };
         switch (kind)
         {
+            case DeviceKind.Generic:
+                g.DrawRectangle(pen,3,8,20,12);
+                g.DrawLine(pen,26,11,26,17);
+                break;
             case DeviceKind.Mouse:
                 using (var body = Rounded(new RectangleF(6, 2, 17, 25), 8))
                     g.DrawPath(pen, body);

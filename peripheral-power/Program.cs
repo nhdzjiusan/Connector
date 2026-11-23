@@ -117,29 +117,44 @@ internal static class Settings
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "PeripheralPower";
-    private static readonly string Folder = Path.Combine(
+    internal static readonly string Folder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PeripheralPower");
     private static readonly string IntervalFile = Path.Combine(Folder, "interval.txt");
+    private static readonly string SettingsFile = Path.Combine(Folder,"settings.json");
+    private sealed record Options(int Interval = 10, bool Startup = false, bool Notifications = true, string Theme = "system");
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static Options options = new();
+    internal static bool Notifications => options.Notifications;
+    internal static string Theme => options.Theme;
     private static string LaunchCommand => $"\"{Application.ExecutablePath}\" --quiet";
 
     public static int LoadInterval()
     {
         try
         {
-            if (int.TryParse(File.ReadAllText(IntervalFile), out int minutes) && minutes is >= 5 and <= 15)
-                return minutes;
+            if (File.Exists(SettingsFile))
+                options = JsonSerializer.Deserialize<Options>(File.ReadAllText(SettingsFile),Json) ?? new();
+            else
+            {
+                int minutes = File.Exists(IntervalFile) && int.TryParse(File.ReadAllText(IntervalFile), out int n) ? n : 10;
+                Save(new(Math.Clamp(minutes,5,15),StartsAtLogin()));
+            }
         }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-        return 10;
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or System.Security.SecurityException)
+        { ErrorLog.Write("读取设置",ex); }
+        return Math.Clamp(options.Interval,5,15);
     }
 
-    public static void SaveInterval(int value)
+    public static void SaveInterval(int value) => Save(options with {Interval=value});
+    public static void SetNotifications(bool value) => Save(options with {Notifications=value});
+    public static void SyncStartup(bool value) { if (options.Startup != value) Save(options with {Startup=value}); }
+    private static void Save(Options next)
     {
         Directory.CreateDirectory(Folder);
-        var temp = IntervalFile + ".tmp";
-        File.WriteAllText(temp, value.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        File.Move(temp, IntervalFile, overwrite: true);
+        var temp = SettingsFile + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(next,Json));
+        File.Move(temp, SettingsFile, overwrite: true);
+        options = next;
     }
 
     public static bool StartsAtLogin()
@@ -193,16 +208,28 @@ internal sealed class PowerContext : ApplicationContext
 
         panel.SetInterval(Settings.LoadInterval());
         bool repaired = false;
-        try { repaired = Settings.RepairStartup(); panel.SetStartup(Settings.StartsAtLogin()); }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
+        try { repaired = Settings.RepairStartup(); bool enabled = Settings.StartsAtLogin(); panel.SetStartup(enabled); Settings.SyncStartup(enabled); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
             ErrorLog.Write("读取自启动设置",ex);
             panel.Report("无法读取自启动设置");
         }
         panel.IntervalChanged += SetInterval;
         panel.StartupChanged += enabled => SetStartup(enabled);
+        panel.SetNotifications(Settings.Notifications);
+        panel.NotificationsChanged += enabled =>
+        {
+            try { Settings.SetNotifications(enabled); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { ErrorLog.Write("低电量通知设置",ex); panel.SetNotifications(!enabled); panel.Report("通知设置保存失败"); }
+        };
         panel.RefreshRequested += () => _ = RefreshAsync();
-        panel.ExitRequested += ExitThread;
+        panel.ExitRequested += () =>
+        {
+            if (Settings.StartsAtLogin() && MessageBox.Show(panel,"本次退出后，下次登录仍将自动启动。现在退出？",
+                "外设电量",MessageBoxButtons.OKCancel,MessageBoxIcon.Question) != DialogResult.OK) return;
+            ExitThread();
+        };
 
         menu.Items.Add("打开电量与设置", null, (_, _) => ShowPanel(Cursor.Position));
         menu.Items.Add("立即刷新", null, (_, _) => _ = RefreshAsync());
@@ -218,7 +245,7 @@ internal sealed class PowerContext : ApplicationContext
         launcher.BalloonTipClicked += (_,_) => { if (restartOffered) Program.Restart(); };
         strip.ContextMenuStrip = menu;
         strip.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowPanel(Cursor.Position); };
-        strip.AvailabilityChanged += visible => launcher.Visible = !visible || restartOffered;
+        strip.AvailabilityChanged += visible => { stripVisible = visible; UpdateFallback(); };
 
         poll.Interval = checked(panel.IntervalMinutes * 60_000);
         poll.Tick += (_, _) => _ = RefreshAsync();
@@ -283,7 +310,7 @@ internal sealed class PowerContext : ApplicationContext
     {
         if (closing) return;
         try { dispatcher.BeginInvoke(() => { if (!closing) action(); }); }
-        catch (InvalidOperationException) { } // Dispatcher closed before the device callback completed.
+        catch (InvalidOperationException ex) { if (!closing) ErrorLog.Write("设备事件分发",ex); }
     }
 
     private void SetInterval(int value)
@@ -308,6 +335,7 @@ internal sealed class PowerContext : ApplicationContext
         try
         {
             Settings.SetStartup(enabled);
+            Settings.SyncStartup(enabled);
             panel.Report(enabled ? "已开启登录自启动" : "已关闭登录自启动");
             return true;
         }
@@ -343,12 +371,14 @@ internal sealed class PowerContext : ApplicationContext
             var now = DateTime.Now;
             usbChanged |= removeUsb && usb.Result.Present == null;
             bleChanged |= removeBle && bluetooth.Result.Present == null;
-            readings = Merge("usb-",usb.Result,removeUsb,now).Concat(Merge("ble-",bluetooth.Result,removeBle,now))
+            readings = Merge(readings,"usb-",usb.Result,removeUsb,now).Concat(Merge(readings,"ble-",bluetooth.Result,removeBle,now))
                 .OrderBy(r => r.Kind).ThenBy(r => r.Name).ToArray();
             if (usb.Result.Fresh.Length + bluetooth.Result.Fresh.Length > 0) updated = now;
             if (usb.Result.Partial || bluetooth.Result.Partial || readings.Any(r => r.Stale))
                 warning = "部分设备未响应 · 已保留上次读数";
             strip.SetDevices(readings);
+            UpdateFallback();
+            NotifyLow();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
         {
@@ -371,7 +401,7 @@ internal sealed class PowerContext : ApplicationContext
         }
     }
 
-    private IEnumerable<BatteryReading> Merge(string prefix, PollResult result, bool topologyChanged, DateTime now)
+    internal static IEnumerable<BatteryReading> Merge(BatteryReading[] readings,string prefix, PollResult result, bool topologyChanged, DateTime now)
     {
         var fresh = result.Fresh.ToDictionary(r => r.Id);
         foreach (var row in fresh.Values) yield return row with { SampledAt = now };
@@ -386,6 +416,41 @@ internal sealed class PowerContext : ApplicationContext
         catch (Exception ex) { return PollResult.Failed(source,ex); }
     }
 
+    private bool stripVisible;
+    private readonly Dictionary<(DeviceKind,int,bool,bool),Icon> art = [];
+    private readonly Dictionary<string,NotifyIcon> fallback = [];
+    private readonly Dictionary<string,int> alerted = [];
+    private void UpdateFallback()
+    {
+        var needed = stripVisible ? [] : readings.Select(r => r.Id).ToHashSet();
+        foreach (var id in fallback.Keys.Where(id => !needed.Contains(id)).ToArray())
+        { fallback[id].Dispose(); fallback.Remove(id); }
+        foreach (var r in readings.Where(r => needed.Contains(r.Id)))
+        {
+            if (!fallback.TryGetValue(r.Id,out var icon)) { fallback[r.Id] = icon = new(); ConfigureIcon(icon); }
+            var key = (r.Kind,r.Percent,r.Charging,r.IsReference);
+            if (!art.TryGetValue(key,out var drawing)) art[key] = drawing = TrayArt.MakeReading(r);
+            icon.Icon = drawing;
+            var tip = $"{r.Name} {r.Percent}% {r.PowerStatus}".TrimEnd();
+            icon.Text = tip[..Math.Min(63,tip.Length)];
+            icon.Visible = true;
+        }
+        launcher.Visible = restartOffered || (!stripVisible && fallback.Count == 0);
+    }
+
+    private void NotifyLow()
+    {
+        foreach (var r in readings.Where(r => !r.Stale))
+        {
+            if (r.Percent > 20 || r.Charging || r.FullOnPower) { alerted.Remove(r.Id); continue; }
+            int threshold = r.Percent <= 5 ? 5 : r.Percent <= 10 ? 10 : 20;
+            if (!Settings.Notifications || alerted.TryGetValue(r.Id,out int sent) && sent <= threshold) continue;
+            alerted[r.Id] = threshold;
+            launcher.Visible = true;
+            launcher.ShowBalloonTip(5000,"外设电量",$"{r.Name} 剩余 {r.Percent}%",ToolTipIcon.Warning);
+        }
+    }
+
     protected override void ExitThreadCore()
     {
         if (closing) return;
@@ -397,6 +462,8 @@ internal sealed class PowerContext : ApplicationContext
         poll.Dispose();
         deviceDelay.Dispose();
         strip.Dispose();
+        foreach (var icon in fallback.Values) icon.Dispose();
+        foreach (var drawing in art.Values) drawing.Dispose();
         launcher.Visible = false;
         launcher.Dispose();
         launcherIcon.Dispose();
